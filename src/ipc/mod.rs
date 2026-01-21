@@ -19,19 +19,21 @@ pub fn socket_name() -> Result<Name<'static>> {
     Ok(name)
 }
 
+/// Builds the IPC socket name, honoring an optional override string.
+///
+/// # Errors
+///
+/// Returns an error if the platform specific socket name cannot be constructed.
 pub fn socket_name_with_override(
     override_raw: Option<&str>,
 ) -> Result<(Name<'static>, Option<std::path::PathBuf>)> {
-    let raw = match override_raw {
-        Some(x) => x,
-        None => {
-            if GenericNamespaced::is_supported() {
-                SOCKET_PRINT_NAME
-            } else {
-                SOCKET_FS_FALLBACK
-            }
+    let raw = override_raw.unwrap_or_else(|| {
+        if GenericNamespaced::is_supported() {
+            SOCKET_PRINT_NAME
+        } else {
+            SOCKET_FS_FALLBACK
         }
-    };
+    });
 
     // Intentional leak: interprocess requires a 'static name, and we build it once per process.
     let leaked: &'static str = Box::leak(raw.to_owned().into_boxed_str());

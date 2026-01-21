@@ -20,7 +20,6 @@ thiserror = "2.0"
 toml = "0.9"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-windows = "0.62"
 ctrlc = "3.5"
 strum = "0.27"
 strum_macros = "0.27"
