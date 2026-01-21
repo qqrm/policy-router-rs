@@ -11,11 +11,13 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use interprocess::local_socket::{ListenerNonblockingMode, ListenerOptions, prelude::*};
+use interprocess::local_socket::{
+    GenericNamespaced, ListenerNonblockingMode, ListenerOptions, prelude::*,
+};
 use policy_router_rs::{
     ipc::{
-        DecisionInfo, DecisionSource, ErrorResponse, MatcherInfo, MatcherKind, Request, Response,
-        SOCKET_ENV_VAR, StatusResponse, read_json_line, write_json_line,
+        DecisionInfo, DecisionSource, DiagnosticsResponse, ErrorResponse, MatcherInfo, MatcherKind,
+        Request, Response, SOCKET_ENV_VAR, StatusResponse, read_json_line, write_json_line,
     },
     policy::{config::AppConfig, engine},
 };
@@ -39,8 +41,12 @@ struct Cli {
 struct State {
     started_at: Instant,
     config_path: PathBuf,
+    socket: String,
     cfg: RwLock<AppConfig>,
     running: AtomicBool,
+    ipc_requests: std::sync::atomic::AtomicU64,
+    reload_ok: std::sync::atomic::AtomicU64,
+    reload_err: std::sync::atomic::AtomicU64,
 }
 
 fn main() -> Result<()> {
@@ -57,11 +63,17 @@ fn main() -> Result<()> {
 
     let cfg = AppConfig::load_from_path(&cli.config)?;
 
+    let socket_label = resolve_socket_label(cli.socket.as_deref());
+
     let state = Arc::new(State {
         started_at: Instant::now(),
         config_path: cli.config,
+        socket: socket_label,
         cfg: RwLock::new(cfg),
         running: AtomicBool::new(true),
+        ipc_requests: std::sync::atomic::AtomicU64::new(0),
+        reload_ok: std::sync::atomic::AtomicU64::new(0),
+        reload_err: std::sync::atomic::AtomicU64::new(0),
     });
 
     ctrlc::set_handler({
@@ -118,6 +130,22 @@ fn resolve_ipc_socket(
     policy_router_rs::ipc::socket_name_with_override(override_socket)
 }
 
+fn resolve_socket_label(cli_socket: Option<&str>) -> String {
+    let env_socket = std::env::var(SOCKET_ENV_VAR).ok();
+    let override_socket = cli_socket.or(env_socket.as_deref());
+
+    match override_socket {
+        Some(x) => x.to_owned(),
+        None => {
+            if GenericNamespaced::is_supported() {
+                policy_router_rs::ipc::SOCKET_PRINT_NAME.to_owned()
+            } else {
+                policy_router_rs::ipc::SOCKET_FS_FALLBACK.to_owned()
+            }
+        }
+    }
+}
+
 fn cleanup_fs_socket(path: Option<&PathBuf>) {
     if let Some(p) = path {
         let _ = std::fs::remove_file(p);
@@ -126,6 +154,11 @@ fn cleanup_fs_socket(path: Option<&PathBuf>) {
 
 fn handle_conn(state: &Arc<State>, mut conn: interprocess::local_socket::Stream) -> Result<()> {
     let req: Request = read_json_line(BufReader::new(&mut conn))?;
+
+    state
+        .ipc_requests
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let resp = handle_request(state.as_ref(), req);
     write_json_line(&mut conn, &resp)?;
     Ok(())
@@ -136,10 +169,18 @@ fn handle_request(state: &State, req: Request) -> Response {
         Request::Status => Response::OkStatus(build_status(state)),
         Request::Reload => match reload_config(state) {
             Ok(()) => {
+                state
+                    .reload_ok
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
                 info!("reloaded config");
                 Response::OkReload
             }
             Err(e) => {
+                state
+                    .reload_err
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
                 warn!(error = %format!("{e:#}"), "reload failed");
                 Response::Err(ErrorResponse {
                     message: format!("{e:#}"),
@@ -151,9 +192,8 @@ fn handle_request(state: &State, req: Request) -> Response {
             info!("stop requested");
             Response::OkStop
         }
-        Request::Explain(x) => {
-            Response::OkExplain(explain(state, x.process.as_deref(), x.domain.as_deref()))
-        }
+        Request::Explain(x) => handle_explain(state, x),
+        Request::Diagnostics => Response::OkDiagnostics(build_diagnostics(state)),
     }
 }
 
@@ -178,10 +218,32 @@ fn build_status(state: &State) -> StatusResponse {
     }
 }
 
+fn build_diagnostics(state: &State) -> DiagnosticsResponse {
+    let uptime_ms: u64 = state.started_at.elapsed().as_millis() as u64;
+
+    let cfg = state.cfg.read().expect("config lock poisoned");
+
+    DiagnosticsResponse {
+        uptime_ms,
+        config_path: state.config_path.display().to_string(),
+        socket: state.socket.clone(),
+        egress_count: cfg.egress.len(),
+        running: state.running.load(Ordering::SeqCst),
+        ipc_requests: state.ipc_requests.load(std::sync::atomic::Ordering::SeqCst),
+        reload_ok: state.reload_ok.load(std::sync::atomic::Ordering::SeqCst),
+        reload_err: state.reload_err.load(std::sync::atomic::Ordering::SeqCst),
+    }
+}
+
 fn reload_config(state: &State) -> Result<()> {
     let next = AppConfig::load_from_path(&state.config_path)?;
     *state.cfg.write().expect("config lock poisoned") = next;
     Ok(())
+}
+
+fn handle_explain(state: &State, req: policy_router_rs::ipc::ExplainRequest) -> Response {
+    let decision = explain(state, req.process.as_deref(), req.domain.as_deref());
+    Response::OkExplain(decision)
 }
 
 fn explain(

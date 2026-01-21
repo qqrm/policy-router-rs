@@ -28,6 +28,7 @@ enum Cmd {
     Status,
     Reload,
     Stop,
+    Diagnostics,
     Explain {
         #[arg(long)]
         process: Option<String>,
@@ -46,15 +47,23 @@ fn main() -> Result<()> {
         Cmd::Status => Request::Status,
         Cmd::Reload => Request::Reload,
         Cmd::Stop => Request::Stop,
+        Cmd::Diagnostics => Request::Diagnostics,
         Cmd::Explain { process, domain } => Request::Explain(ExplainRequest { process, domain }),
     };
 
     let resp = client_roundtrip(&mut conn, &req)?;
 
-    match cli.format {
-        OutputFormat::Text => print_text(resp),
+    let res = match cli.format {
+        OutputFormat::Text => print_text(resp.clone()),
         OutputFormat::Json => print_json(&resp),
+    };
+
+    if matches!(resp, Response::Err(_)) {
+        // Deterministic non-zero exit for scripted usage.
+        std::process::exit(2);
     }
+
+    res
 }
 
 fn resolve_ipc_socket(
@@ -109,6 +118,16 @@ fn print_text(resp: Response) -> Result<()> {
                 println!("  pattern: {}", m.pattern);
             }
             println!("reason: {}", x.decision.reason);
+        }
+        Response::OkDiagnostics(d) => {
+            println!("uptime_ms: {}", d.uptime_ms);
+            println!("config_path: {}", d.config_path);
+            println!("socket: {}", d.socket);
+            println!("egress_count: {}", d.egress_count);
+            println!("running: {}", d.running);
+            println!("ipc_requests: {}", d.ipc_requests);
+            println!("reload_ok: {}", d.reload_ok);
+            println!("reload_err: {}", d.reload_err);
         }
         Response::Err(e) => {
             anyhow::bail!("error: {}", e.message);
