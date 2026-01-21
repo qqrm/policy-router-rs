@@ -1,15 +1,15 @@
 # SmartDPI Router RS
 
-SmartDPI Router RS is a Windows traffic router focused on one thing: **split tunneling enforcement**.
+SmartDPI Router RS is a Windows traffic router focused on one thing: split tunneling enforcement.
 
-It provides **policy based routing by process and by domain**, sending traffic into one of multiple egress paths:
+It provides policy based routing by process and by domain, sending traffic into one of multiple egress paths:
 
 - VPN path: a local VPN core proxy (sing-box VLESS, etc)
-- DPI bypass path: a local SOCKS5/HTTP proxy (CIADPI) for targets like YouTube
+- DPI bypass path: a local SOCKS5 or HTTP proxy (CIADPI) for targets like YouTube
 - DIRECT: no proxy
 - BLOCK: deny traffic
 
-The goal is to keep DPI bypass tools stable (CIADPI must not break), while still having a working “VPN for selected apps and domains”.
+The goal is to keep DPI bypass tools stable (CIADPI must not break), while still having a working "VPN for selected apps and domains".
 
 ## What we are building
 
@@ -17,15 +17,58 @@ We are building a router with two layers:
 
 1) Policy Engine (pure logic)
 - Reads config (rules)
-- Decides where a flow must go: `vpn | proxy | direct | block`
+- Decides where a flow must go: vpn | proxy | direct | block
 - Explains why a decision was made (matched rule)
 
 2) Split Tunneling Enforcement (Windows)
 - Enforces policy for real traffic
 - Per app routing based on process identity
 - Optional domain routing via DNS correlation (domain -> IP cache)
+- Loop prevention to avoid self sabotage
 
-This is the core of the project: **TUN with real per app bypass**, so some processes never enter the VPN tunnel.
+This is the core of the project: TUN with real per app bypass, so some processes never enter the VPN tunnel.
+
+## High level architecture
+
+We split the implementation into three parts:
+
+1) `policy-routerd` (daemon)
+- Long running process
+- Owns enforcement lifecycle
+- Applies and maintains system state (WFP, routes, DNS cache, etc)
+- Optionally supervises external egress processes (sing-box, CIADPI)
+- Exposes a local control API (IPC)
+
+2) `policy-routerctl` (client)
+- CLI tool to manage the daemon
+- Sends commands via IPC:
+  - status
+  - reload
+  - stop
+  - explain
+  - diagnostics
+
+3) `policy-router-rs` (library)
+- Shared types
+- Config parsing
+- Policy engine
+- Rule matching and explanation
+- Domain suffix matching helpers
+
+This separation is intentional:
+- daemon is the only component that touches Windows networking
+- ctl is safe to run anytime and never changes global state directly
+- GUI (Phase 3) will reuse the same IPC API as `policy-routerctl`
+
+## IPC
+
+Daemon and client communicate via local only IPC.
+
+Target for Windows:
+- Named Pipes (recommended)
+
+Optional later:
+- localhost HTTP API (debug only, locked down)
 
 ## Egress paths
 
@@ -64,9 +107,9 @@ Drop traffic intentionally.
 - VPN core process must never be routed into CIADPI
 - defaults must be safe
 
-## Why PAC/system proxy is not enough
+## Why PAC or system proxy is not enough
 
-PAC/system proxy only works for apps that respect proxy settings.
+PAC or system proxy only works for apps that respect proxy settings.
 
 This project targets the stronger requirement:
 - route by process identity
@@ -76,27 +119,35 @@ So enforcement is done at the Windows networking layer (split tunneling).
 
 ## MVP scope
 
-### Phase 1: policy engine + skeleton enforcement
+### Phase 1: policy engine + daemon and ctl skeleton
 
 Policy:
 - TOML config
 - app rules + domain rules
-- decision output: `vpn | proxy | direct | block`
+- decision output: vpn | proxy | direct | block
 - logs: matched rule + selected egress
+
+Daemon and ctl:
+- daemon process exists and stays running
+- ctl can connect via IPC and request:
+  - `explain` decision for (process, domain)
+  - `status`
+  - `reload` (re read config)
+  - `stop` (clean teardown)
 
 Enforcement (minimal, evolving):
 - start/stop supervision for:
-  - sing-box core
-  - CIADPI
-- build the enforcement layer that can route by process
-  - first focus: process based “vpn vs direct vs proxy”
+  - sing-box core (optional)
+  - CIADPI (optional)
+- prepare enforcement layer that can route by process
+  - first focus: process based vpn vs direct vs proxy
   - then: domain based routing via DNS cache
 
 ### Explicit non goals for Phase 1
 - full featured GUI
 - geoip/geosite management
 - DPI bypass logic inside this repo
-- “works without admin permissions”
+- "works without admin permissions"
 
 ## Configuration (concept)
 
@@ -114,12 +165,12 @@ Example outcomes:
 - `zen.exe` + `youtube.com` -> `proxy` (CIADPI)
 - `zen.exe` + `chatgpt.com` -> `vpn` (sing-box)
 - `ciadpi.exe` -> `direct`
-- unknown app/domain -> `direct`
+- unknown app or domain -> `direct`
 
 ## Roadmap
 
 Phase 2:
-- stable split tunneling enforcement implementation
+- stable split tunneling enforcement implementation (WFP)
 - domain routing via DNS correlation cache
 - rule sets and includes
 

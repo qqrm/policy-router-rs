@@ -27,6 +27,32 @@ pub enum DecisionReason {
     },
 }
 
+impl DecisionReason {
+    #[must_use]
+    pub fn to_human(&self) -> String {
+        match self {
+            Self::BlockByApp { process_name } => {
+                format!("block by app: {process_name}")
+            }
+            Self::BlockByDomain { domain } => {
+                format!("block by domain: {domain}")
+            }
+            Self::AppMatch {
+                process_name,
+                egress,
+            } => {
+                format!("app match: {process_name} -> {egress}")
+            }
+            Self::DomainMatch { domain, egress } => {
+                format!("domain match: {domain} -> {egress}")
+            }
+            Self::Default { egress } => {
+                format!("default: {egress}")
+            }
+        }
+    }
+}
+
 #[must_use]
 pub fn decide(cfg: &AppConfig, process_name: Option<&str>, domain: Option<&str>) -> Decision {
     decide_block(cfg, process_name, domain)

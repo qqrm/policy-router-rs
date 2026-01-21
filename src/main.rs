@@ -1,19 +1,12 @@
-mod policy;
-
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, warn};
-
-use crate::policy::{
-    config::AppConfig,
-    engine::{DecisionReason, decide},
-};
+use policy_router_rs::policy::{config::AppConfig, engine};
 
 #[derive(Debug, Parser)]
-#[command(name = "policy-router-rs")]
-struct Cli {
+#[command(version, about = "Policy engine CLI (debug tool).")]
+struct Args {
     /// Path to config.toml. If omitted, tries ./config.toml then ./config/config.example.toml
     #[arg(long)]
     config: Option<PathBuf>,
@@ -28,81 +21,47 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    init_logging();
+    tracing_subscriber::fmt().without_time().compact().init();
 
-    let cli = Cli::parse();
-    let config_path = resolve_config_path(cli.config.as_deref());
-    info!(config = %config_path.display(), "using config");
+    let args = Args::parse();
+    let config_path = resolve_config_path(args.config.as_deref())?;
 
-    let cfg = load_config(&config_path)?;
+    tracing::info!(config = %config_path.display(), "using config");
+    let cfg = AppConfig::load_from_path(&config_path)?;
 
-    let decision = decide(&cfg, cli.process.as_deref(), cli.domain.as_deref());
+    let decision = engine::decide(&cfg, args.process.as_deref(), args.domain.as_deref());
 
-    let egress_spec = cfg
-        .egress_spec(&decision.egress)
-        .with_context(|| format!("egress '{}' not found in config", decision.egress))?;
+    let egress_id = decision.egress.clone();
+    let spec = cfg
+        .egress
+        .get(&egress_id)
+        .with_context(|| format!("egress id {egress_id:?} not found in config"))?;
 
-    info!(
-        egress = %decision.egress,
-        egress_type = %egress_spec.kind,
-        endpoint = %egress_spec.endpoint.as_deref().unwrap_or("<none>"),
-        reason = %format_reason(&decision.reason),
+    tracing::info!(
+        egress = %egress_id.0,
+        egress_type = %spec.kind.as_str(),
+        endpoint = %spec.endpoint.as_deref().unwrap_or(""),
+        reason = %decision.reason.to_human(),
         "decision"
     );
 
     Ok(())
 }
 
-fn init_logging() {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .compact()
-        .init();
-}
-
-fn resolve_config_path(explicit: Option<&Path>) -> PathBuf {
-    if let Some(p) = explicit {
-        return p.to_path_buf();
+fn resolve_config_path(override_path: Option<&Path>) -> Result<PathBuf> {
+    if let Some(p) = override_path {
+        return Ok(p.to_path_buf());
     }
 
     let p1 = PathBuf::from("config.toml");
     if p1.exists() {
-        return p1;
+        return Ok(p1);
     }
 
     let p2 = PathBuf::from("config").join("config.example.toml");
     if p2.exists() {
-        return p2;
+        return Ok(p2);
     }
 
-    warn!("config.toml not found, defaulting to config/config.example.toml");
-    p2
-}
-
-fn load_config(path: &Path) -> Result<AppConfig> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config: {}", path.display()))?;
-
-    let cfg: AppConfig = toml::from_str(&text)
-        .with_context(|| format!("failed to parse TOML: {}", path.display()))?;
-
-    Ok(cfg)
-}
-
-fn format_reason(r: &DecisionReason) -> String {
-    match r {
-        DecisionReason::BlockByApp { process_name } => format!("block by app: {process_name}"),
-        DecisionReason::BlockByDomain { domain } => format!("block by domain: {domain}"),
-        DecisionReason::AppMatch {
-            process_name,
-            egress,
-        } => {
-            format!("app match: {process_name} -> {egress}")
-        }
-        DecisionReason::DomainMatch { domain, egress } => {
-            format!("domain match: {domain} -> {egress}")
-        }
-        DecisionReason::Default { egress } => format!("default -> {egress}"),
-    }
+    anyhow::bail!("no config found: tried ./config.toml and ./config/config.example.toml");
 }

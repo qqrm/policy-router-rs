@@ -1,18 +1,33 @@
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, fs, path::Path};
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub defaults: Defaults,
+    #[serde(default)]
     pub egress: BTreeMap<EgressId, EgressSpec>,
     pub rules: Rules,
 }
 
 impl AppConfig {
-    #[must_use]
-    pub fn egress_spec(&self, id: &EgressId) -> Option<&EgressSpec> {
-        self.egress.get(id)
+    /// Loads application configuration from a TOML file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - the file cannot be read
+    /// - the file contents are not valid UTF-8
+    /// - the TOML cannot be parsed into [`AppConfig`]
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config: {}", path.display()))?;
+
+        let cfg: Self = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse TOML config: {}", path.display()))?;
+
+        Ok(cfg)
     }
 }
 
@@ -68,8 +83,11 @@ pub struct EgressSpec {
     pub endpoint: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+use strum_macros::{Display, IntoStaticStr};
+
+#[derive(Debug, Clone, Copy, Deserialize, IntoStaticStr, Display)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum EgressKind {
     Singbox,
     Socks5,
@@ -77,14 +95,9 @@ pub enum EgressKind {
     Block,
 }
 
-impl fmt::Display for EgressKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::Singbox => "singbox",
-            Self::Socks5 => "socks5",
-            Self::Direct => "direct",
-            Self::Block => "block",
-        };
-        f.write_str(s)
+impl EgressKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
