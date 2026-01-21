@@ -26,6 +26,8 @@ pub enum DecisionReason {
         egress: EgressId,
     },
 }
+
+#[must_use]
 pub fn decide(cfg: &AppConfig, process_name: Option<&str>, domain: Option<&str>) -> Decision {
     decide_block(cfg, process_name, domain)
         .or_else(|| decide_domain(cfg, domain))

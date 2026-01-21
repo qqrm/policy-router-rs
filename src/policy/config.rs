@@ -10,6 +10,7 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    #[must_use]
     pub fn egress_spec(&self, id: &EgressId) -> Option<&EgressSpec> {
         self.egress.get(id)
     }
