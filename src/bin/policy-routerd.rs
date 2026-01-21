@@ -11,13 +11,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use interprocess::local_socket::{
-    GenericNamespaced, ListenerNonblockingMode, ListenerOptions, prelude::*,
-};
+use interprocess::local_socket::{ListenerNonblockingMode, ListenerOptions, prelude::*};
 use policy_router_rs::{
     ipc::{
         DecisionInfo, DecisionSource, ErrorResponse, MatcherInfo, MatcherKind, Request, Response,
-        SOCKET_FS_FALLBACK, StatusResponse, read_json_line, socket_name, write_json_line,
+        SOCKET_ENV_VAR, StatusResponse, read_json_line, write_json_line,
     },
     policy::{config::AppConfig, engine},
 };
@@ -29,6 +27,9 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[arg(long, default_value = "config.toml")]
     config: PathBuf,
+
+    #[arg(long)]
+    socket: Option<String>,
 
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -54,10 +55,6 @@ fn main() -> Result<()> {
         .with_level(true)
         .init();
 
-    if !GenericNamespaced::is_supported() {
-        let _ = std::fs::remove_file(SOCKET_FS_FALLBACK);
-    }
-
     let cfg = AppConfig::load_from_path(&cli.config)?;
 
     let state = Arc::new(State {
@@ -75,7 +72,8 @@ fn main() -> Result<()> {
     })
     .context("failed to set Ctrl+C handler")?;
 
-    let name = socket_name()?;
+    let (name, fs_socket_path) = resolve_ipc_socket(cli.socket.as_deref())?;
+    cleanup_fs_socket(fs_socket_path.as_ref());
 
     let listener = ListenerOptions::new()
         .name(name)
@@ -107,11 +105,23 @@ fn main() -> Result<()> {
 
     info!("stopping");
 
-    if !GenericNamespaced::is_supported() {
-        let _ = std::fs::remove_file(SOCKET_FS_FALLBACK);
-    }
+    cleanup_fs_socket(fs_socket_path.as_ref());
 
     Ok(())
+}
+
+fn resolve_ipc_socket(
+    cli_socket: Option<&str>,
+) -> Result<(interprocess::local_socket::Name<'static>, Option<PathBuf>)> {
+    let env_socket = std::env::var(SOCKET_ENV_VAR).ok();
+    let override_socket = cli_socket.or(env_socket.as_deref());
+    policy_router_rs::ipc::socket_name_with_override(override_socket)
+}
+
+fn cleanup_fs_socket(path: Option<&PathBuf>) {
+    if let Some(p) = path {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 fn handle_conn(state: &Arc<State>, mut conn: interprocess::local_socket::Stream) -> Result<()> {

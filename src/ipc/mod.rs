@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SOCKET_PRINT_NAME: &str = "policy-routerd.sock";
 pub const SOCKET_FS_FALLBACK: &str = "/tmp/policy-routerd.sock";
+pub const SOCKET_ENV_VAR: &str = "POLICY_ROUTER_SOCKET";
 
 /// Builds the IPC socket name.
 ///
@@ -13,17 +14,46 @@ pub const SOCKET_FS_FALLBACK: &str = "/tmp/policy-routerd.sock";
 ///
 /// Returns an error if the platform specific socket name cannot be constructed.
 pub fn socket_name() -> Result<Name<'static>> {
-    let name = if GenericNamespaced::is_supported() {
-        SOCKET_PRINT_NAME
-            .to_ns_name::<GenericNamespaced>()
-            .context("failed to build namespaced local socket name")?
-    } else {
-        SOCKET_FS_FALLBACK
-            .to_fs_name::<GenericFilePath>()
-            .context("failed to build filesystem local socket name")?
+    let env_socket = std::env::var(SOCKET_ENV_VAR).ok();
+    let (name, _fs_path) = socket_name_with_override(env_socket.as_deref())?;
+    Ok(name)
+}
+
+pub fn socket_name_with_override(
+    override_raw: Option<&str>,
+) -> Result<(Name<'static>, Option<std::path::PathBuf>)> {
+    let raw = match override_raw {
+        Some(x) => x,
+        None => {
+            if GenericNamespaced::is_supported() {
+                SOCKET_PRINT_NAME
+            } else {
+                SOCKET_FS_FALLBACK
+            }
+        }
     };
 
-    Ok(name)
+    // Intentional leak: interprocess requires a 'static name, and we build it once per process.
+    let leaked: &'static str = Box::leak(raw.to_owned().into_boxed_str());
+
+    if GenericNamespaced::is_supported() && !looks_like_fs_path(raw) {
+        let name = leaked
+            .to_ns_name::<GenericNamespaced>()
+            .context("failed to build namespaced local socket name")?;
+        Ok((name, None))
+    } else {
+        let name = leaked
+            .to_fs_name::<GenericFilePath>()
+            .context("failed to build filesystem local socket name")?;
+        Ok((name, Some(std::path::PathBuf::from(raw))))
+    }
+}
+
+fn looks_like_fs_path(s: &str) -> bool {
+    s.starts_with('/')
+        || s.starts_with('.')
+        || s.contains('\\')
+        || s.contains(':')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,12 +1,15 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use interprocess::local_socket::{Stream, prelude::*};
-use policy_router_rs::ipc::{ExplainRequest, Request, Response, client_roundtrip, socket_name};
+use policy_router_rs::ipc::{ExplainRequest, Request, Response, SOCKET_ENV_VAR, client_roundtrip};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
 #[command(name = "policy-routerctl")]
 struct Cli {
+    #[arg(long)]
+    socket: Option<String>,
+
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
 
@@ -36,7 +39,7 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let name = socket_name()?;
+    let name = resolve_ipc_socket(cli.socket.as_deref())?;
     let mut conn = Stream::connect(name).context("failed to connect to policy-routerd")?;
 
     let req = match cli.cmd {
@@ -52,6 +55,15 @@ fn main() -> Result<()> {
         OutputFormat::Text => print_text(resp),
         OutputFormat::Json => print_json(&resp),
     }
+}
+
+fn resolve_ipc_socket(
+    cli_socket: Option<&str>,
+) -> Result<interprocess::local_socket::Name<'static>> {
+    let env_socket = std::env::var(SOCKET_ENV_VAR).ok();
+    let override_socket = cli_socket.or(env_socket.as_deref());
+    let (name, _fs_path) = policy_router_rs::ipc::socket_name_with_override(override_socket)?;
+    Ok(name)
 }
 
 fn fmt_snake_case<T: Serialize>(value: &T) -> Result<String> {
