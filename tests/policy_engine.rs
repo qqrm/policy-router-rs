@@ -50,8 +50,10 @@ fn domain_wins_over_app() {
     assert_eq!(d.egress, eid("proxy"));
 
     match d.reason {
-        DecisionReason::DomainMatch { domain, egress, .. } => {
-            assert_eq!(domain, "youtube.com");
+        DecisionReason::DomainRule {
+            pattern, egress, ..
+        } => {
+            assert_eq!(pattern, "youtube.com");
             assert_eq!(egress, eid("proxy"));
         }
         other => panic!("unexpected reason: {other:?}"),
@@ -66,12 +68,8 @@ fn app_used_when_no_domain_match() {
     assert_eq!(d.egress, eid("vpn"));
 
     match d.reason {
-        DecisionReason::AppMatch {
-            process_name,
-            egress,
-            ..
-        } => {
-            assert_eq!(process_name, "zen.exe");
+        DecisionReason::AppRule { pattern, egress } => {
+            assert_eq!(pattern, "zen.exe");
             assert_eq!(egress, eid("vpn"));
         }
         other => panic!("unexpected reason: {other:?}"),
@@ -101,8 +99,8 @@ fn block_by_app_has_top_priority() {
     assert_eq!(d.egress, eid("block"));
 
     match d.reason {
-        DecisionReason::BlockByApp { process_name, .. } => {
-            assert_eq!(process_name, "bad.exe");
+        DecisionReason::BlockByApp { pattern } => {
+            assert_eq!(pattern, "bad.exe");
         }
         other => panic!("unexpected reason: {other:?}"),
     }
@@ -116,8 +114,8 @@ fn block_by_domain_has_top_priority() {
     assert_eq!(d.egress, eid("block"));
 
     match d.reason {
-        DecisionReason::BlockByDomain { domain, .. } => {
-            assert_eq!(domain, "blocked.example");
+        DecisionReason::BlockByDomain { pattern, .. } => {
+            assert_eq!(pattern, "blocked.example");
         }
         other => panic!("unexpected reason: {other:?}"),
     }
@@ -149,6 +147,34 @@ fn app_matching_case_insensitive() {
 
     let d = decide(&cfg, Some("ZEN.EXE"), Some("unknown.example"));
     assert_eq!(d.egress, eid("vpn"));
+}
+
+#[test]
+fn reason_includes_suffix_domain_match_details() {
+    let cfg = cfg_minimal();
+
+    let d = decide(
+        &cfg,
+        Some("zen.exe"),
+        Some("r1---sn-abcdef.googlevideo.com"),
+    );
+    let reason = d.reason.to_human();
+
+    assert!(reason.contains("domain"));
+    assert!(reason.contains("suffix"));
+    assert!(reason.contains("googlevideo.com"));
+}
+
+#[test]
+fn reason_includes_exact_app_match_details() {
+    let cfg = cfg_minimal();
+
+    let d = decide(&cfg, Some("curl.exe"), Some("unknown.example"));
+    let reason = d.reason.to_human();
+
+    assert!(reason.contains("app"));
+    assert!(reason.contains("exact"));
+    assert!(reason.contains("curl.exe"));
 }
 
 #[test]

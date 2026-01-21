@@ -256,60 +256,9 @@ fn explain(
         engine::decide(&cfg, process, domain)
     };
 
-    let (source, rule_egress, matcher) = match &decision.reason {
-        engine::DecisionReason::BlockByApp { pattern, .. } => (
-            DecisionSource::BlockApp,
-            Some("block".to_owned()),
-            Some(MatcherInfo {
-                kind: MatcherKind::Exact,
-                pattern: pattern.clone(),
-            }),
-        ),
-        engine::DecisionReason::BlockByDomain {
-            pattern,
-            match_kind,
-            ..
-        } => (
-            DecisionSource::BlockDomain,
-            Some("block".to_owned()),
-            Some(MatcherInfo {
-                kind: match match_kind {
-                    engine::MatchKind::Exact => MatcherKind::Exact,
-                    engine::MatchKind::Suffix => MatcherKind::Suffix,
-                },
-                pattern: pattern.clone(),
-            }),
-        ),
-        engine::DecisionReason::AppMatch {
-            pattern, egress, ..
-        } => (
-            DecisionSource::AppRule,
-            Some(egress.to_string()),
-            Some(MatcherInfo {
-                kind: MatcherKind::Exact,
-                pattern: pattern.clone(),
-            }),
-        ),
-        engine::DecisionReason::DomainMatch {
-            pattern,
-            match_kind,
-            egress,
-            ..
-        } => (
-            DecisionSource::DomainRule,
-            Some(egress.to_string()),
-            Some(MatcherInfo {
-                kind: match match_kind {
-                    engine::MatchKind::Exact => MatcherKind::Exact,
-                    engine::MatchKind::Suffix => MatcherKind::Suffix,
-                },
-                pattern: pattern.clone(),
-            }),
-        ),
-        engine::DecisionReason::Default { egress } => {
-            (DecisionSource::Default, Some(egress.to_string()), None)
-        }
-    };
+    let source = map_source(&decision.reason);
+    let rule_egress = Some(map_rule_egress(&decision.reason));
+    let matcher = map_matcher(&decision.reason);
 
     policy_router_rs::ipc::ExplainResponse {
         decision: DecisionInfo {
@@ -319,6 +268,56 @@ fn explain(
             rule_egress,
             matcher,
         },
+    }
+}
+
+const fn map_source(reason: &engine::DecisionReason) -> DecisionSource {
+    match reason {
+        engine::DecisionReason::BlockByApp { .. } => DecisionSource::BlockApp,
+        engine::DecisionReason::BlockByDomain { .. } => DecisionSource::BlockDomain,
+        engine::DecisionReason::AppRule { .. } => DecisionSource::AppRule,
+        engine::DecisionReason::DomainRule { .. } => DecisionSource::DomainRule,
+        engine::DecisionReason::Default { .. } => DecisionSource::Default,
+    }
+}
+
+fn map_rule_egress(reason: &engine::DecisionReason) -> String {
+    match reason {
+        engine::DecisionReason::BlockByApp { .. }
+        | engine::DecisionReason::BlockByDomain { .. } => "block".to_owned(),
+        engine::DecisionReason::AppRule { egress, .. }
+        | engine::DecisionReason::DomainRule { egress, .. }
+        | engine::DecisionReason::Default { egress } => egress.to_string(),
+    }
+}
+
+fn map_matcher(reason: &engine::DecisionReason) -> Option<MatcherInfo> {
+    match reason {
+        engine::DecisionReason::BlockByApp { pattern }
+        | engine::DecisionReason::AppRule { pattern, .. } => Some(MatcherInfo {
+            kind: MatcherKind::Exact,
+            pattern: pattern.clone(),
+        }),
+        engine::DecisionReason::BlockByDomain {
+            pattern,
+            match_kind,
+        }
+        | engine::DecisionReason::DomainRule {
+            pattern,
+            match_kind,
+            ..
+        } => Some(MatcherInfo {
+            kind: map_matcher_kind(*match_kind),
+            pattern: pattern.clone(),
+        }),
+        engine::DecisionReason::Default { .. } => None,
+    }
+}
+
+const fn map_matcher_kind(match_kind: engine::MatchKind) -> MatcherKind {
+    match match_kind {
+        engine::MatchKind::Exact => MatcherKind::Exact,
+        engine::MatchKind::Suffix => MatcherKind::Suffix,
     }
 }
 
@@ -380,6 +379,7 @@ mod tests {
         // Config must remain unchanged in memory
         let current = state.cfg.read().expect("config lock poisoned");
         assert_eq!(current.defaults.egress.0, original_cfg.defaults.egress.0);
+        drop(current);
 
         // Best effort cleanup
         let _ = std::fs::remove_file(path);
@@ -425,6 +425,7 @@ block = []
         // Must be updated
         let current = state.cfg.read().expect("config lock poisoned");
         assert_eq!(current.defaults.egress.0, "direct");
+        drop(current);
 
         let _ = std::fs::remove_file(path);
     }

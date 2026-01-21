@@ -25,24 +25,20 @@ impl MatchKind {
 #[derive(Debug, Clone)]
 pub enum DecisionReason {
     BlockByApp {
-        process_name: String,
         pattern: String,
     },
     BlockByDomain {
-        domain: String,
         pattern: String,
         match_kind: MatchKind,
     },
-    AppMatch {
-        process_name: String,
-        pattern: String,
+    AppRule {
         egress: EgressId,
+        pattern: String,
     },
-    DomainMatch {
-        domain: String,
+    DomainRule {
+        egress: EgressId,
         pattern: String,
         match_kind: MatchKind,
-        egress: EgressId,
     },
     Default {
         egress: EgressId,
@@ -53,52 +49,38 @@ impl DecisionReason {
     #[must_use]
     pub fn to_human(&self) -> String {
         match self {
-            Self::BlockByApp {
-                process_name,
-                pattern,
-            } => {
-                if pattern.eq_ignore_ascii_case(process_name) {
-                    format!("block by app: {process_name}")
-                } else {
-                    format!("block by app: {process_name} (matched: {pattern})")
-                }
+            Self::BlockByApp { pattern } => {
+                format!("blocked: app exact match '{pattern}' has highest priority")
             }
             Self::BlockByDomain {
-                domain,
                 pattern,
                 match_kind,
             } => {
-                format!(
-                    "block by domain: {domain} (matched: {} {pattern})",
-                    match_kind.as_str()
-                )
+                let mk = match_kind_to_str(*match_kind);
+                format!("blocked: domain {mk} match '{pattern}' has highest priority")
             }
-            Self::AppMatch {
-                process_name,
-                pattern,
+            Self::AppRule { egress, pattern } => {
+                format!("app rule: exact match '{pattern}' -> egress '{egress}'")
+            }
+            Self::DomainRule {
                 egress,
-            } => {
-                if pattern.eq_ignore_ascii_case(process_name) {
-                    format!("app match: {process_name} -> {egress}")
-                } else {
-                    format!("app match: {process_name} -> {egress} (matched: {pattern})")
-                }
-            }
-            Self::DomainMatch {
-                domain,
                 pattern,
                 match_kind,
-                egress,
             } => {
-                format!(
-                    "domain match: {domain} -> {egress} (matched: {} {pattern})",
-                    match_kind.as_str()
-                )
+                let mk = match_kind_to_str(*match_kind);
+                format!("domain rule: {mk} match '{pattern}' -> egress '{egress}'")
             }
             Self::Default { egress } => {
-                format!("default: {egress}")
+                format!("default: egress '{egress}' (no rules matched)")
             }
         }
+    }
+}
+
+const fn match_kind_to_str(k: MatchKind) -> &'static str {
+    match k {
+        MatchKind::Exact => "exact",
+        MatchKind::Suffix => "suffix",
     }
 }
 
@@ -126,10 +108,7 @@ fn decide_block(
     {
         return Some(Decision {
             egress: EgressId("block".to_string()),
-            reason: DecisionReason::BlockByApp {
-                process_name: name.to_string(),
-                pattern,
-            },
+            reason: DecisionReason::BlockByApp { pattern },
         });
     }
 
@@ -139,7 +118,6 @@ fn decide_block(
         return Some(Decision {
             egress: EgressId("block".to_string()),
             reason: DecisionReason::BlockByDomain {
-                domain: d.to_string(),
                 pattern: m.pattern,
                 match_kind: m.match_kind,
             },
@@ -163,8 +141,7 @@ fn choose_domain(domain: &str, suffixes: &[String], egress: &str) -> Option<Deci
     let e = EgressId(egress.to_string());
     Some(Decision {
         egress: e.clone(),
-        reason: DecisionReason::DomainMatch {
-            domain: domain.to_string(),
+        reason: DecisionReason::DomainRule {
             pattern: m.pattern,
             match_kind: m.match_kind,
             egress: e,
@@ -186,11 +163,7 @@ fn choose_app(process_name: &str, names: &[String], egress: &str) -> Option<Deci
     let e = EgressId(egress.to_string());
     Some(Decision {
         egress: e.clone(),
-        reason: DecisionReason::AppMatch {
-            process_name: process_name.to_string(),
-            pattern,
-            egress: e,
-        },
+        reason: DecisionReason::AppRule { pattern, egress: e },
     })
 }
 

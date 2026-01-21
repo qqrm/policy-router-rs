@@ -13,6 +13,12 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
 
+    #[arg(long)]
+    quiet: bool,
+
+    #[arg(long)]
+    fail_fast: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -54,7 +60,7 @@ fn main() -> Result<()> {
     let resp = client_roundtrip(&mut conn, &req)?;
 
     let res = match cli.format {
-        OutputFormat::Text => print_text(resp.clone()),
+        OutputFormat::Text => print_text(&resp, cli.quiet),
         OutputFormat::Json => print_json(&resp),
     };
 
@@ -86,33 +92,37 @@ fn print_json(resp: &Response) -> Result<()> {
     Ok(())
 }
 
-fn print_text(resp: Response) -> Result<()> {
+fn print_text(resp: &Response, quiet: bool) -> Result<()> {
     match resp {
         Response::OkStatus(s) => {
             println!("uptime_ms: {}", s.uptime_ms);
             println!("config_path: {}", s.config_path);
             println!("egress:");
-            for e in s.egress {
+            for e in &s.egress {
                 println!("  - id: {}", e.id);
                 println!("    kind: {}", e.kind);
-                if let Some(ep) = e.endpoint {
+                if let Some(ep) = &e.endpoint {
                     println!("    endpoint: {ep}",);
                 }
             }
         }
         Response::OkReload => {
-            println!("ok: reloaded");
+            if !quiet {
+                println!("reloaded: true");
+            }
         }
         Response::OkStop => {
-            println!("ok: stopping");
+            if !quiet {
+                println!("stopping: true");
+            }
         }
         Response::OkExplain(x) => {
             println!("egress: {}", x.decision.egress);
             println!("source: {}", fmt_snake_case(&x.decision.source)?);
-            if let Some(rule_egress) = x.decision.rule_egress {
+            if let Some(rule_egress) = &x.decision.rule_egress {
                 println!("rule_egress: {rule_egress}");
             }
-            if let Some(m) = x.decision.matcher {
+            if let Some(m) = &x.decision.matcher {
                 println!("matcher:");
                 println!("  type: {}", fmt_snake_case(&m.kind)?);
                 println!("  pattern: {}", m.pattern);
@@ -130,7 +140,7 @@ fn print_text(resp: Response) -> Result<()> {
             println!("reload_err: {}", d.reload_err);
         }
         Response::Err(e) => {
-            anyhow::bail!("error: {}", e.message);
+            println!("error: {}", e.message);
         }
     }
 
