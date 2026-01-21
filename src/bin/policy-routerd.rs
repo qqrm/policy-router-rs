@@ -134,16 +134,16 @@ fn resolve_socket_label(cli_socket: Option<&str>) -> String {
     let env_socket = std::env::var(SOCKET_ENV_VAR).ok();
     let override_socket = cli_socket.or(env_socket.as_deref());
 
-    match override_socket {
-        Some(x) => x.to_owned(),
-        None => {
+    override_socket.map_or_else(
+        || {
             if GenericNamespaced::is_supported() {
                 policy_router_rs::ipc::SOCKET_PRINT_NAME.to_owned()
             } else {
                 policy_router_rs::ipc::SOCKET_FS_FALLBACK.to_owned()
             }
-        }
-    }
+        },
+        str::to_owned,
+    )
 }
 
 fn cleanup_fs_socket(path: Option<&PathBuf>) {
@@ -192,7 +192,7 @@ fn handle_request(state: &State, req: Request) -> Response {
             info!("stop requested");
             Response::OkStop
         }
-        Request::Explain(x) => handle_explain(state, x),
+        Request::Explain(x) => handle_explain(state, &x),
         Request::Diagnostics => Response::OkDiagnostics(build_diagnostics(state)),
     }
 }
@@ -219,7 +219,7 @@ fn build_status(state: &State) -> StatusResponse {
 }
 
 fn build_diagnostics(state: &State) -> DiagnosticsResponse {
-    let uptime_ms: u64 = state.started_at.elapsed().as_millis() as u64;
+    let uptime_ms = u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     let cfg = state.cfg.read().expect("config lock poisoned");
 
@@ -241,7 +241,7 @@ fn reload_config(state: &State) -> Result<()> {
     Ok(())
 }
 
-fn handle_explain(state: &State, req: policy_router_rs::ipc::ExplainRequest) -> Response {
+fn handle_explain(state: &State, req: &policy_router_rs::ipc::ExplainRequest) -> Response {
     let decision = explain(state, req.process.as_deref(), req.domain.as_deref());
     Response::OkExplain(decision)
 }
