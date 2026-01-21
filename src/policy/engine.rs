@@ -6,20 +6,42 @@ pub struct Decision {
     pub reason: DecisionReason,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum MatchKind {
+    Exact,
+    Suffix,
+}
+
+impl MatchKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Suffix => "suffix",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DecisionReason {
     BlockByApp {
         process_name: String,
+        pattern: String,
     },
     BlockByDomain {
         domain: String,
+        pattern: String,
+        match_kind: MatchKind,
     },
     AppMatch {
         process_name: String,
+        pattern: String,
         egress: EgressId,
     },
     DomainMatch {
         domain: String,
+        pattern: String,
+        match_kind: MatchKind,
         egress: EgressId,
     },
     Default {
@@ -31,26 +53,59 @@ impl DecisionReason {
     #[must_use]
     pub fn to_human(&self) -> String {
         match self {
-            Self::BlockByApp { process_name } => {
-                format!("block by app: {process_name}")
+            Self::BlockByApp {
+                process_name,
+                pattern,
+            } => {
+                if pattern.eq_ignore_ascii_case(process_name) {
+                    format!("block by app: {process_name}")
+                } else {
+                    format!("block by app: {process_name} (matched: {pattern})")
+                }
             }
-            Self::BlockByDomain { domain } => {
-                format!("block by domain: {domain}")
+            Self::BlockByDomain {
+                domain,
+                pattern,
+                match_kind,
+            } => {
+                format!(
+                    "block by domain: {domain} (matched: {} {pattern})",
+                    match_kind.as_str()
+                )
             }
             Self::AppMatch {
                 process_name,
+                pattern,
                 egress,
             } => {
-                format!("app match: {process_name} -> {egress}")
+                if pattern.eq_ignore_ascii_case(process_name) {
+                    format!("app match: {process_name} -> {egress}")
+                } else {
+                    format!("app match: {process_name} -> {egress} (matched: {pattern})")
+                }
             }
-            Self::DomainMatch { domain, egress } => {
-                format!("domain match: {domain} -> {egress}")
+            Self::DomainMatch {
+                domain,
+                pattern,
+                match_kind,
+                egress,
+            } => {
+                format!(
+                    "domain match: {domain} -> {egress} (matched: {} {pattern})",
+                    match_kind.as_str()
+                )
             }
             Self::Default { egress } => {
                 format!("default: {egress}")
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct DomainSuffixMatch {
+    pattern: String,
+    match_kind: MatchKind,
 }
 
 #[must_use]
@@ -67,22 +122,27 @@ fn decide_block(
     domain: Option<&str>,
 ) -> Option<Decision> {
     if let Some(name) = process_name
-        .filter(|n| contains_case_insensitive(&cfg.rules.app.block, n))
-        .map(str::to_string)
+        && let Some(pattern) = find_case_insensitive(&cfg.rules.app.block, name)
     {
         return Some(Decision {
             egress: EgressId("block".to_string()),
-            reason: DecisionReason::BlockByApp { process_name: name },
+            reason: DecisionReason::BlockByApp {
+                process_name: name.to_string(),
+                pattern,
+            },
         });
     }
 
     if let Some(d) = domain
-        .filter(|d| domain_matches_any(&cfg.rules.domain.block, d))
-        .map(str::to_string)
+        && let Some(m) = domain_matches_any(&cfg.rules.domain.block, d)
     {
         return Some(Decision {
             egress: EgressId("block".to_string()),
-            reason: DecisionReason::BlockByDomain { domain: d },
+            reason: DecisionReason::BlockByDomain {
+                domain: d.to_string(),
+                pattern: m.pattern,
+                match_kind: m.match_kind,
+            },
         });
     }
 
@@ -92,26 +152,21 @@ fn decide_block(
 fn decide_domain(cfg: &AppConfig, domain: Option<&str>) -> Option<Decision> {
     let d = domain?;
 
-    choose_domain(cfg, d, &cfg.rules.domain.vpn, "vpn")
-        .or_else(|| choose_domain(cfg, d, &cfg.rules.domain.proxy, "proxy"))
-        .or_else(|| choose_domain(cfg, d, &cfg.rules.domain.direct, "direct"))
+    choose_domain(d, &cfg.rules.domain.vpn, "vpn")
+        .or_else(|| choose_domain(d, &cfg.rules.domain.proxy, "proxy"))
+        .or_else(|| choose_domain(d, &cfg.rules.domain.direct, "direct"))
 }
 
-fn choose_domain(
-    _cfg: &AppConfig,
-    domain: &str,
-    suffixes: &[String],
-    egress: &str,
-) -> Option<Decision> {
-    if !domain_matches_any(suffixes, domain) {
-        return None;
-    }
+fn choose_domain(domain: &str, suffixes: &[String], egress: &str) -> Option<Decision> {
+    let m = domain_matches_any(suffixes, domain)?;
 
     let e = EgressId(egress.to_string());
     Some(Decision {
         egress: e.clone(),
         reason: DecisionReason::DomainMatch {
             domain: domain.to_string(),
+            pattern: m.pattern,
+            match_kind: m.match_kind,
             egress: e,
         },
     })
@@ -120,26 +175,20 @@ fn choose_domain(
 fn decide_app(cfg: &AppConfig, process_name: Option<&str>) -> Option<Decision> {
     let name = process_name?;
 
-    choose_app(cfg, name, &cfg.rules.app.vpn, "vpn")
-        .or_else(|| choose_app(cfg, name, &cfg.rules.app.proxy, "proxy"))
-        .or_else(|| choose_app(cfg, name, &cfg.rules.app.direct, "direct"))
+    choose_app(name, &cfg.rules.app.vpn, "vpn")
+        .or_else(|| choose_app(name, &cfg.rules.app.proxy, "proxy"))
+        .or_else(|| choose_app(name, &cfg.rules.app.direct, "direct"))
 }
 
-fn choose_app(
-    _cfg: &AppConfig,
-    process_name: &str,
-    names: &[String],
-    egress: &str,
-) -> Option<Decision> {
-    if !contains_case_insensitive(names, process_name) {
-        return None;
-    }
+fn choose_app(process_name: &str, names: &[String], egress: &str) -> Option<Decision> {
+    let pattern = find_case_insensitive(names, process_name)?;
 
     let e = EgressId(egress.to_string());
     Some(Decision {
         egress: e.clone(),
         reason: DecisionReason::AppMatch {
             process_name: process_name.to_string(),
+            pattern,
             egress: e,
         },
     })
@@ -154,22 +203,40 @@ fn decide_default(cfg: &AppConfig) -> Decision {
     }
 }
 
-fn contains_case_insensitive(list: &[String], value: &str) -> bool {
-    list.iter().any(|s| s.eq_ignore_ascii_case(value))
+fn find_case_insensitive(list: &[String], value: &str) -> Option<String> {
+    list.iter()
+        .find(|s| s.eq_ignore_ascii_case(value))
+        .map(std::string::ToString::to_string)
 }
 
-fn domain_matches_any(suffixes: &[String], domain: &str) -> bool {
+fn domain_matches_any(suffixes: &[String], domain: &str) -> Option<DomainSuffixMatch> {
     let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    suffixes.iter().any(|raw| domain_matches_suffix(&d, raw))
+    suffixes
+        .iter()
+        .find_map(|raw| domain_matches_suffix(&d, raw))
 }
 
-fn domain_matches_suffix(domain: &str, raw_suffix: &str) -> bool {
+fn domain_matches_suffix(domain: &str, raw_suffix: &str) -> Option<DomainSuffixMatch> {
     let suffix_raw = raw_suffix.trim().trim_end_matches('.').to_ascii_lowercase();
     if suffix_raw.is_empty() {
-        return false;
+        return None;
     }
 
     let suffix = suffix_raw.strip_prefix('.').unwrap_or(suffix_raw.as_str());
 
-    domain == suffix || domain.ends_with(&format!(".{suffix}"))
+    if domain == suffix {
+        return Some(DomainSuffixMatch {
+            pattern: raw_suffix.trim().to_string(),
+            match_kind: MatchKind::Exact,
+        });
+    }
+
+    if domain.ends_with(&format!(".{suffix}")) {
+        return Some(DomainSuffixMatch {
+            pattern: raw_suffix.trim().to_string(),
+            match_kind: MatchKind::Suffix,
+        });
+    }
+
+    None
 }

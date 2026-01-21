@@ -12,21 +12,21 @@ keywords = ["windows", "split-tunnel", "proxy", "vpn", "routing"]
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
-anyhow = "1.0.100"
-clap = { version = "4.5.54", features = ["derive"] }
-ipnet = "2.11.0"
-serde = { version = "1.0.228", features = ["derive"] }
-thiserror = "2.0.18"
-toml = "0.9.8"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+ipnet = "2.11"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+toml = "0.9"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.22"
-windows = "0.62.2"
-ctrlc = "3.5.1"
-strum = "0.27.2"
-strum_macros = "0.27.2"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+windows = "0.62"
+ctrlc = "3.5"
+strum = "0.27"
+strum_macros = "0.27"
 
-interprocess = "2.2.3"
-serde_json = "1.0.148"
+interprocess = "2.2"
+serde_json = "1.0"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

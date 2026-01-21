@@ -1,13 +1,23 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use interprocess::local_socket::{Stream, prelude::*};
 use policy_router_rs::ipc::{ExplainRequest, Request, Response, client_roundtrip, socket_name};
+use serde::Serialize;
 
 #[derive(Debug, Parser)]
 #[command(name = "policy-routerctl")]
 struct Cli {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -38,6 +48,24 @@ fn main() -> Result<()> {
 
     let resp = client_roundtrip(&mut conn, &req)?;
 
+    match cli.format {
+        OutputFormat::Text => print_text(resp),
+        OutputFormat::Json => print_json(&resp),
+    }
+}
+
+fn fmt_snake_case<T: Serialize>(value: &T) -> Result<String> {
+    let raw = serde_json::to_string(value).context("failed to serialize enum")?;
+    Ok(raw.trim_matches('"').to_string())
+}
+
+fn print_json(resp: &Response) -> Result<()> {
+    let s = serde_json::to_string_pretty(&resp).context("failed to serialize response as JSON")?;
+    println!("{s}");
+    Ok(())
+}
+
+fn print_text(resp: Response) -> Result<()> {
     match resp {
         Response::OkStatus(s) => {
             println!("uptime_ms: {}", s.uptime_ms);
@@ -59,6 +87,15 @@ fn main() -> Result<()> {
         }
         Response::OkExplain(x) => {
             println!("egress: {}", x.decision.egress);
+            println!("source: {}", fmt_snake_case(&x.decision.source)?);
+            if let Some(rule_egress) = x.decision.rule_egress {
+                println!("rule_egress: {rule_egress}");
+            }
+            if let Some(m) = x.decision.matcher {
+                println!("matcher:");
+                println!("  type: {}", fmt_snake_case(&m.kind)?);
+                println!("  pattern: {}", m.pattern);
+            }
             println!("reason: {}", x.decision.reason);
         }
         Response::Err(e) => {

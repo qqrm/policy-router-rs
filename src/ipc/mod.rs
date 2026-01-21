@@ -74,6 +74,38 @@ pub struct ExplainResponse {
 pub struct DecisionInfo {
     pub egress: String,
     pub reason: String,
+
+    pub source: DecisionSource,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_egress: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<MatcherInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionSource {
+    BlockApp,
+    BlockDomain,
+    DomainRule,
+    AppRule,
+    Default,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatcherInfo {
+    #[serde(rename = "type")]
+    pub kind: MatcherKind,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatcherKind {
+    Exact,
+    Suffix,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

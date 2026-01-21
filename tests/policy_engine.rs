@@ -50,7 +50,7 @@ fn domain_wins_over_app() {
     assert_eq!(d.egress, eid("proxy"));
 
     match d.reason {
-        DecisionReason::DomainMatch { domain, egress } => {
+        DecisionReason::DomainMatch { domain, egress, .. } => {
             assert_eq!(domain, "youtube.com");
             assert_eq!(egress, eid("proxy"));
         }
@@ -69,6 +69,7 @@ fn app_used_when_no_domain_match() {
         DecisionReason::AppMatch {
             process_name,
             egress,
+            ..
         } => {
             assert_eq!(process_name, "zen.exe");
             assert_eq!(egress, eid("vpn"));
@@ -100,7 +101,7 @@ fn block_by_app_has_top_priority() {
     assert_eq!(d.egress, eid("block"));
 
     match d.reason {
-        DecisionReason::BlockByApp { process_name } => {
+        DecisionReason::BlockByApp { process_name, .. } => {
             assert_eq!(process_name, "bad.exe");
         }
         other => panic!("unexpected reason: {other:?}"),
@@ -115,7 +116,7 @@ fn block_by_domain_has_top_priority() {
     assert_eq!(d.egress, eid("block"));
 
     match d.reason {
-        DecisionReason::BlockByDomain { domain } => {
+        DecisionReason::BlockByDomain { domain, .. } => {
             assert_eq!(domain, "blocked.example");
         }
         other => panic!("unexpected reason: {other:?}"),

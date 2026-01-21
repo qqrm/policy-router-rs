@@ -64,6 +64,23 @@ This separation is intentional:
 
 Daemon and client communicate via local only IPC.
 
+## CLI
+
+Daemon:
+- policy-routerd --config <path>
+- policy-routerd --log-level <level> (default: info, overridden by RUST_LOG)
+
+Client:
+- policy-routerctl status
+- policy-routerctl reload
+- policy-routerctl stop
+- policy-routerctl explain --process <name> --domain <domain>
+
+Output format:
+- default is human readable text
+- use --format json for stable machine readable output
+
+
 Target for Windows:
 - Named Pipes (recommended)
 
@@ -157,8 +174,8 @@ Two rule dimensions:
 
 Decision priority:
 1) block rules (app, domain)
-2) app rules
-3) domain rules
+2) domain rules
+3) app rules
 4) default egress
 
 Example outcomes:
