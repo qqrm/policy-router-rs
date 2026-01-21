@@ -1,8 +1,8 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableExtensions EnableDelayedExpansion
 
-rem Build a review bundle zip using git archive (tracked files only).
-rem Excludes: .git, target, and anything not explicitly included below (e.g. assets).
+rem Build a review bundle ZIP from the current working tree (includes uncommitted changes).
+rem Excludes: .git, target
 
 for /f "usebackq delims=" %%R in (`git rev-parse --show-toplevel 2^>nul`) do set "REPO_ROOT=%%R"
 if "%REPO_ROOT%"=="" (
@@ -15,38 +15,36 @@ pushd "%REPO_ROOT%" >nul
 for /f "usebackq delims=" %%H in (`git rev-parse --short HEAD 2^>nul`) do set "GIT_SHA=%%H"
 if "%GIT_SHA%"=="" set "GIT_SHA=unknown"
 
-for /f "usebackq tokens=1-4 delims=.:/ " %%a in ("%date% %time%") do (
-  set "D1=%%a"
-  set "D2=%%b"
-  set "D3=%%c"
-  set "T1=%%d"
-)
+for /f "usebackq delims=" %%T in (`powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd-HHmm'"`) do set "TS=%%T"
 
-rem Output name: rust-switcher-gpt-YYYY-MM-DD-HHMM-<sha>.zip
-set "OUT_NAME=rust-switcher-gpt-%D3%-%D2%-%D1%-%time:~0,2%%time:~3,2%-%GIT_SHA%.zip"
-set "OUT_NAME=%OUT_NAME: =0%"
+rem Output name: policy-router-rs-gpt-YYYY-MM-DD-HHMM-<sha>.zip
+set "OUT_NAME=policy-router-rs-gpt-%TS%-%GIT_SHA%.zip"
 
 if exist "%OUT_NAME%" del /f /q "%OUT_NAME%" >nul 2>&1
 
-git archive --format=zip --output "%OUT_NAME%" HEAD ^
-  .cargo ^
-  .github ^
-  .vscode ^
-  docs ^
-  res ^
-  src ^
-  Cargo.toml ^
-  Cargo.lock ^
-  build.rs ^
-  rust-toolchain.toml ^
-  rustfmt.toml ^
-  README.md ^
-  LICENSE ^
-  bacon.toml ^
-  .gitignore
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference='Stop';" ^
+  "$root = (Resolve-Path -LiteralPath '%REPO_ROOT%').Path;" ^
+  "$out  = Join-Path $root '%OUT_NAME%';" ^
+  "Add-Type -AssemblyName System.IO.Compression;" ^
+  "Add-Type -AssemblyName System.IO.Compression.FileSystem;" ^
+  "if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }" ^
+  "$zip = [System.IO.Compression.ZipFile]::Open($out, [System.IO.Compression.ZipArchiveMode]::Create);" ^
+  "try {" ^
+  "  $files = Get-ChildItem -LiteralPath $root -Recurse -File -Force | Where-Object {" ^
+  "    $p = $_.FullName;" ^
+  "    $rel = $p.Substring($root.Length).TrimStart('\','/');" ^
+  "    ($rel -notmatch '^(?:\.git[\\/]|target[\\/])') -and ($rel -ne '%OUT_NAME%')" ^
+  "  };" ^
+  "  foreach ($f in $files) {" ^
+  "    $full = $f.FullName;" ^
+  "    $rel  = $full.Substring($root.Length).TrimStart('\','/');" ^
+  "    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $full, $rel, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null;" ^
+  "  }" ^
+  "} finally { $zip.Dispose() }"
 
 if errorlevel 1 (
-  echo ERROR: git archive failed
+  echo ERROR: bundle build failed
   popd >nul
   exit /b 1
 )
