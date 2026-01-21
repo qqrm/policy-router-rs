@@ -53,7 +53,7 @@ pub enum Response {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
-    pub uptime_ms: u128,
+    pub uptime_ms: u64,
     pub config_path: String,
     pub egress: Vec<EgressInfo>,
 }

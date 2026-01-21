@@ -126,7 +126,7 @@ fn build_status(state: &State) -> StatusResponse {
     };
 
     StatusResponse {
-        uptime_ms: state.started_at.elapsed().as_millis(),
+        uptime_ms: u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
         config_path: state.config_path.display().to_string(),
         egress,
     }
