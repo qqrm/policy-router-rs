@@ -5,8 +5,8 @@ use interprocess::local_socket::{
     GenericFilePath, GenericNamespaced, ListenerOptions, Stream, prelude::*,
 };
 use policy_router_rs::ipc::{
-    DecisionInfo, DecisionSource, EgressInfo, ExplainRequest, ExplainResponse, MatcherInfo,
-    MatcherKind, Request, Response, StatusResponse, client_roundtrip, read_json_line,
+    DecisionInfo, DecisionSource, DiagnosticsResponse, EgressInfo, ExplainRequest, ExplainResponse,
+    MatcherInfo, MatcherKind, Request, Response, StatusResponse, client_roundtrip, read_json_line,
     write_json_line,
 };
 
@@ -132,6 +132,16 @@ fn spawn_stateful_server(
                         },
                     })
                 }
+                Request::Diagnostics => Response::OkDiagnostics(DiagnosticsResponse {
+                    uptime_ms: 123,
+                    config_path: "config.toml".to_owned(),
+                    socket: "test.sock".to_owned(),
+                    egress_count: 2,
+                    running: true,
+                    ipc_requests: 1,
+                    reload_ok: 0,
+                    reload_err: 0,
+                }),
             };
 
             write_json_line(&mut conn, &resp).expect("failed to write response");
@@ -247,6 +257,31 @@ fn ipc_stop_roundtrip() -> Result<()> {
 
     // Server exited, so a new connection should fail.
     assert!(Stream::connect(name).is_err());
+
+    Ok(())
+}
+
+#[test]
+fn ipc_diagnostics_roundtrip() -> Result<()> {
+    let name = make_name()?;
+    let _server = spawn_stateful_server(name.clone(), 1).wait_ready();
+
+    let mut conn = Stream::connect(name).context("failed to connect to test IPC server")?;
+    let resp = client_roundtrip(&mut conn, &Request::Diagnostics)?;
+
+    match resp {
+        Response::OkDiagnostics(d) => {
+            assert_eq!(d.uptime_ms, 123);
+            assert_eq!(d.config_path, "config.toml");
+            assert_eq!(d.socket, "test.sock");
+            assert_eq!(d.egress_count, 2);
+            assert!(d.running);
+            assert_eq!(d.ipc_requests, 1);
+            assert_eq!(d.reload_ok, 0);
+            assert_eq!(d.reload_err, 0);
+        }
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
 
     Ok(())
 }
