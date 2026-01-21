@@ -50,10 +50,7 @@ pub fn socket_name_with_override(
 }
 
 fn looks_like_fs_path(s: &str) -> bool {
-    s.starts_with('/')
-        || s.starts_with('.')
-        || s.contains('\\')
-        || s.contains(':')
+    s.starts_with('/') || s.starts_with('.') || s.contains('\\') || s.contains(':')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +60,7 @@ pub enum Request {
     Reload,
     Stop,
     Explain(ExplainRequest),
+    Diagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +76,7 @@ pub enum Response {
     OkReload,
     OkStop,
     OkExplain(ExplainResponse),
+    OkDiagnostics(DiagnosticsResponse),
     Err(ErrorResponse),
 }
 
@@ -86,6 +85,18 @@ pub struct StatusResponse {
     pub uptime_ms: u64,
     pub config_path: String,
     pub egress: Vec<EgressInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsResponse {
+    pub uptime_ms: u64,
+    pub config_path: String,
+    pub socket: String,
+    pub egress_count: usize,
+    pub running: bool,
+    pub ipc_requests: u64,
+    pub reload_ok: u64,
+    pub reload_err: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
