@@ -183,7 +183,7 @@ fn handle_request(state: &State, req: Request) -> Response {
 
                 warn!(error = %format!("{e:#}"), "reload failed");
                 Response::Err(ErrorResponse {
-                    message: format!("{e:#}"),
+                    message: format!("reload failed for {}: {:#}", state.config_path.display(), e),
                 })
             }
         },
@@ -319,5 +319,113 @@ fn explain(
             rule_egress,
             matcher,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn write_file(path: &PathBuf, contents: &str) {
+        fs::write(path, contents).expect("failed to write temp config");
+    }
+
+    fn tmp_path(tag: &str) -> PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        std::env::temp_dir().join(format!("policy-router-{tag}-{pid}-{nanos}.toml"))
+    }
+
+    fn load_example_config() -> AppConfig {
+        let raw = include_str!("../../config/config.example.toml");
+        toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse")
+    }
+
+    fn make_state(config_path: PathBuf, cfg: AppConfig) -> State {
+        State {
+            started_at: Instant::now(),
+            config_path,
+            socket: "test.sock".to_owned(),
+            cfg: RwLock::new(cfg),
+            running: AtomicBool::new(true),
+            ipc_requests: std::sync::atomic::AtomicU64::new(0),
+            reload_ok: std::sync::atomic::AtomicU64::new(0),
+            reload_err: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    #[test]
+    fn reload_invalid_config_keeps_old() {
+        let path = tmp_path("reload-invalid");
+
+        // Initial valid config
+        let original_cfg = load_example_config();
+        write_file(&path, include_str!("../../config/config.example.toml"));
+
+        let state = make_state(path.clone(), original_cfg.clone());
+
+        // Break the file
+        write_file(&path, "this = [ is not valid toml");
+
+        // Reload must fail
+        let err = reload_config(&state).err();
+        assert!(err.is_some());
+
+        // Config must remain unchanged in memory
+        let current = state.cfg.read().expect("config lock poisoned");
+        assert_eq!(current.defaults.egress.0, original_cfg.defaults.egress.0);
+
+        // Best effort cleanup
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reload_valid_config_updates_state() {
+        let path = tmp_path("reload-valid");
+
+        // Initial valid config from example
+        write_file(&path, include_str!("../../config/config.example.toml"));
+        let original_cfg = AppConfig::load_from_path(&path).expect("must load initial config");
+
+        let state = make_state(path.clone(), original_cfg);
+
+        // Write another valid config with different defaults.egress
+        // Minimal toml: keep required sections only
+        let next_raw = r#"
+[defaults]
+egress = "direct"
+
+[egress.direct]
+type = "direct"
+
+[rules.app]
+vpn = []
+proxy = []
+direct = []
+block = []
+
+[rules.domain]
+vpn = []
+proxy = []
+direct = []
+block = []
+"#;
+
+        write_file(&path, next_raw);
+
+        // Reload must succeed
+        reload_config(&state).expect("reload should succeed");
+
+        // Must be updated
+        let current = state.cfg.read().expect("config lock poisoned");
+        assert_eq!(current.defaults.egress.0, "direct");
+
+        let _ = std::fs::remove_file(path);
     }
 }
