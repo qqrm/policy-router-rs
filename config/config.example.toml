@@ -1,0 +1,40 @@
+[defaults]
+egress = "direct"
+
+[egress.vpn]
+type = "singbox"
+endpoint = "socks5://127.0.0.1:1488"
+
+[egress.proxy]
+type = "socks5"
+endpoint = "socks5://127.0.0.1:1080"
+
+[egress.direct]
+type = "direct"
+
+[egress.block]
+type = "block"
+
+[rules.app]
+vpn = ["zen.exe", "Telegram.exe", "Element.exe"]
+proxy = []
+direct = ["ciadpi.exe"]
+block = []
+
+[rules.domain]
+vpn = ["chatgpt.com", "discord.com", "github.com"]
+
+proxy = [
+    "youtube.com",
+    "youtu.be",
+    "googlevideo.com",
+    "ytimg.com",
+    "ggpht.com",
+    "gvt1.com",
+    "youtube-nocookie.com",
+    "youtubei.googleapis.com",
+    "youtube.googleapis.com",
+]
+
+direct = ["ru", "рф", "su", ".lan"]
+block = []

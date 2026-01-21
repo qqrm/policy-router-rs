@@ -3,4 +3,36 @@ name = "policy-router-rs"
 version = "0.1.0"
 edition = "2024"
 
+description = "Windows split tunneling policy router (apps + domains) for VPN core and DPI-bypass proxy"
+license = "MIT"
+repository = "https://github.com/qqrm/policy-router-rs"
+homepage = "https://github.com/qqrm/policy-router-rs"
+readme = "README.md"
+keywords = ["windows", "split-tunnel", "proxy", "vpn", "routing"]
+categories = ["command-line-utilities", "network-programming"]
+
 [dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.54", features = ["derive"] }
+ipnet = "2.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+toml = "0.9.8"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+windows = "0.62.2"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+nursery = "deny"
+cargo = "deny"
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"

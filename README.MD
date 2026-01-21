@@ -1,87 +1,132 @@
 # SmartDPI Router RS
 
-SmartDPI Router RS is a Windows user mode traffic router that applies domain and app based policies to send traffic through one of multiple egress paths:
-- VPN core (sing-box VLESS, etc)
-- DPI bypass proxy (CIADPI or any local SOCKS5/HTTP proxy)
-- DIRECT (no proxy)
+SmartDPI Router RS is a Windows traffic router focused on one thing: **split tunneling enforcement**.
 
-The main goal is to route selected domains (example: YouTube) through a dedicated DPI bypass proxy while keeping the rest of traffic on VPN or DIRECT, with strict loop prevention.
+It provides **policy based routing by process and by domain**, sending traffic into one of multiple egress paths:
 
-## What we want
+- VPN path: a local VPN core proxy (sing-box VLESS, etc)
+- DPI bypass path: a local SOCKS5/HTTP proxy (CIADPI) for targets like YouTube
+- DIRECT: no proxy
+- BLOCK: deny traffic
 
-We want a single, configurable router that supports:
+The goal is to keep DPI bypass tools stable (CIADPI must not break), while still having a working “VPN for selected apps and domains”.
 
-1) Domain based routing (primary)
-- domain -> DPI bypass proxy (CIADPI)
-- domain -> VPN core (sing-box local proxy)
-- domain -> DIRECT
+## What we are building
 
-2) App based routing (secondary)
-- app -> DPI bypass proxy
-- app -> VPN core
-- app -> DIRECT
+We are building a router with two layers:
 
-3) Proxy routing for selected domains
-- Explicitly send YouTube domains to CIADPI even when other traffic goes through VPN
-- Keep CIADPI stable by avoiding TUN related loop and reassembly issues
+1) Policy Engine (pure logic)
+- Reads config (rules)
+- Decides where a flow must go: `vpn | proxy | direct | block`
+- Explains why a decision was made (matched rule)
 
-4) Loop prevention (hard requirement)
-- CIADPI process must never be routed into VPN core
-- VPN core must never be routed into CIADPI
-- Safe defaults that do not create feedback loops
+2) Split Tunneling Enforcement (Windows)
+- Enforces policy for real traffic
+- Per app routing based on process identity
+- Optional domain routing via DNS correlation (domain -> IP cache)
 
-## MVP (Phase 1)
+This is the core of the project: **TUN with real per app bypass**, so some processes never enter the VPN tunnel.
 
-Primary goals:
-- Route YouTube domains to CIADPI (SOCKS5 on 127.0.0.1:1080)
-- Route all other domains to sing-box local proxy (mixed/socks/http)
-- Allow DIRECT for local and optional country rules
-- Provide clear logs: which rule matched and which egress was selected
+## Egress paths
 
-Deliverables:
-- Single CLI binary
-- YAML config for rules and endpoints
-- PAC generation + system proxy apply/restore
-- Optional process supervision for:
-  - sing-box
+### VPN egress
+A local proxy endpoint (provided by sing-box or compatible core):
+- inbound on `127.0.0.1:1488`
+- outbound goes to provider (VLESS, Reality, etc)
+
+### DPI bypass egress
+A dedicated local proxy endpoint (CIADPI or compatible):
+- SOCKS5 on `127.0.0.1:1080`
+- used for YouTube domains
+- must stay outside VPN and outside our packet mangling
+
+### DIRECT
+No proxy, system networking as is.
+
+### BLOCK
+Drop traffic intentionally.
+
+## Hard requirements
+
+1) App routing must work
+- Selected apps go to VPN
+- Selected apps go to CIADPI
+- Selected apps go DIRECT
+- Selected apps are BLOCKED
+
+2) Domain routing must work (for the apps we route)
+- YouTube domain list -> CIADPI
+- VPN whitelist domains -> VPN
+- Optional direct domains -> DIRECT
+
+3) No loop and no self sabotage
+- CIADPI process must never be routed into VPN
+- VPN core process must never be routed into CIADPI
+- defaults must be safe
+
+## Why PAC/system proxy is not enough
+
+PAC/system proxy only works for apps that respect proxy settings.
+
+This project targets the stronger requirement:
+- route by process identity
+- enforce routing even if the app ignores proxy settings
+
+So enforcement is done at the Windows networking layer (split tunneling).
+
+## MVP scope
+
+### Phase 1: policy engine + skeleton enforcement
+
+Policy:
+- TOML config
+- app rules + domain rules
+- decision output: `vpn | proxy | direct | block`
+- logs: matched rule + selected egress
+
+Enforcement (minimal, evolving):
+- start/stop supervision for:
+  - sing-box core
   - CIADPI
-- Clean teardown on exit (restore Windows proxy settings)
+- build the enforcement layer that can route by process
+  - first focus: process based “vpn vs direct vs proxy”
+  - then: domain based routing via DNS cache
 
-## MVP constraints
+### Explicit non goals for Phase 1
+- full featured GUI
+- geoip/geosite management
+- DPI bypass logic inside this repo
+- “works without admin permissions”
 
-- No full system TUN routing
-- No kernel drivers
-- No DPI logic inside this project
-- No GUI in Phase 1
+## Configuration (concept)
 
-## Configuration outline
+Two rule dimensions:
+- app rules: `process_name -> egress`
+- domain rules: `domain_suffix -> egress`
 
-Egress endpoints (example):
-- `ciadpi`: `socks5://127.0.0.1:1080`
-- `vpn`: `mixed://127.0.0.1:1488`
-- `direct`: `direct://`
+Decision priority:
+1) block rules (app, domain)
+2) app rules
+3) domain rules
+4) default egress
 
-Routing rules (example):
-- YouTube domains -> `ciadpi`
-- ChatGPT and Discord -> `vpn`
-- `*.ru`, `*.lan`, private networks -> `direct`
-
-App routing (example):
+Example outcomes:
+- `zen.exe` + `youtube.com` -> `proxy` (CIADPI)
+- `zen.exe` + `chatgpt.com` -> `vpn` (sing-box)
 - `ciadpi.exe` -> `direct`
-- `zen.exe` -> `vpn` (unless domain rule sends to `ciadpi`)
+- unknown app/domain -> `direct`
 
 ## Roadmap
 
 Phase 2:
-- Rule sets and include files
-- Better app routing options on Windows
-- Optional DNS policy layer for target domains
+- stable split tunneling enforcement implementation
+- domain routing via DNS correlation cache
+- rule sets and includes
 
 Phase 3:
 - GUI (optional)
-- Profiles and presets
-- Observability and metrics
+- profiles, presets, metrics
 
 ## License
 
-TBD
+MIT
