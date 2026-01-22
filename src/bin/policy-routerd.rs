@@ -2,7 +2,7 @@ use std::{
     io::{self, BufReader},
     path::PathBuf,
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use clap::Parser;
 use interprocess::local_socket::{
     GenericNamespaced, ListenerNonblockingMode, ListenerOptions, prelude::*,
@@ -42,7 +43,7 @@ struct State {
     started_at: Instant,
     config_path: PathBuf,
     socket: String,
-    cfg: RwLock<AppConfig>,
+    cfg: ArcSwap<AppConfig>,
     running: AtomicBool,
     ipc_requests: std::sync::atomic::AtomicU64,
     reload_ok: std::sync::atomic::AtomicU64,
@@ -69,7 +70,7 @@ fn main() -> Result<()> {
         started_at: Instant::now(),
         config_path: cli.config,
         socket: socket_label,
-        cfg: RwLock::new(cfg),
+        cfg: ArcSwap::from_pointee(cfg),
         running: AtomicBool::new(true),
         ipc_requests: std::sync::atomic::AtomicU64::new(0),
         reload_ok: std::sync::atomic::AtomicU64::new(0),
@@ -169,18 +170,10 @@ fn handle_request(state: &State, req: Request) -> Response {
         Request::Status => Response::OkStatus(build_status(state)),
         Request::Reload => match reload_config(state) {
             Ok(()) => {
-                state
-                    .reload_ok
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
                 info!("reloaded config");
                 Response::OkReload
             }
             Err(e) => {
-                state
-                    .reload_err
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
                 warn!(error = %format!("{e:#}"), "reload failed");
                 Response::Err(ErrorResponse {
                     message: format!("reload failed for {}: {:#}", state.config_path.display(), e),
@@ -198,18 +191,16 @@ fn handle_request(state: &State, req: Request) -> Response {
 }
 
 fn build_status(state: &State) -> StatusResponse {
-    let egress = {
-        let cfg = state.cfg.read().expect("config lock poisoned");
-
-        cfg.egress
-            .iter()
-            .map(|(id, spec)| policy_router_rs::ipc::EgressInfo {
-                id: id.to_string(),
-                kind: spec.kind.to_string(),
-                endpoint: spec.endpoint.clone(),
-            })
-            .collect::<Vec<_>>()
-    };
+    let cfg = state.cfg.load();
+    let egress = cfg
+        .egress
+        .iter()
+        .map(|(id, spec)| policy_router_rs::ipc::EgressInfo {
+            id: id.to_string(),
+            kind: spec.kind.to_string(),
+            endpoint: spec.endpoint.clone(),
+        })
+        .collect::<Vec<_>>();
 
     StatusResponse {
         uptime_ms: u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -221,7 +212,7 @@ fn build_status(state: &State) -> StatusResponse {
 fn build_diagnostics(state: &State) -> DiagnosticsResponse {
     let uptime_ms = u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let cfg = state.cfg.read().expect("config lock poisoned");
+    let cfg = state.cfg.load();
 
     DiagnosticsResponse {
         uptime_ms,
@@ -236,8 +227,18 @@ fn build_diagnostics(state: &State) -> DiagnosticsResponse {
 }
 
 fn reload_config(state: &State) -> Result<()> {
-    let next = AppConfig::load_from_path(&state.config_path)?;
-    *state.cfg.write().expect("config lock poisoned") = next;
+    let next = match AppConfig::load_from_path(&state.config_path)
+        .with_context(|| format!("failed to load config {}", state.config_path.display()))
+    {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            state.reload_err.fetch_add(1, Ordering::Relaxed);
+            return Err(err);
+        }
+    };
+
+    state.cfg.store(Arc::new(next));
+    state.reload_ok.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
@@ -252,7 +253,7 @@ fn explain(
     domain: Option<&str>,
 ) -> policy_router_rs::ipc::ExplainResponse {
     let decision = {
-        let cfg = state.cfg.read().expect("config lock poisoned");
+        let cfg = state.cfg.load();
         engine::decide(&cfg, process, domain)
     };
 
@@ -354,7 +355,7 @@ mod tests {
             started_at: Instant::now(),
             config_path,
             socket: "test.sock".to_owned(),
-            cfg: RwLock::new(cfg),
+            cfg: ArcSwap::from_pointee(cfg),
             running: AtomicBool::new(true),
             ipc_requests: std::sync::atomic::AtomicU64::new(0),
             reload_ok: std::sync::atomic::AtomicU64::new(0),
@@ -380,9 +381,11 @@ mod tests {
         assert!(err.is_some());
 
         // Config must remain unchanged in memory
-        let current = state.cfg.read().expect("config lock poisoned");
+        let current = state.cfg.load();
         assert_eq!(current.defaults.egress.0, original_cfg.defaults.egress.0);
-        drop(current);
+
+        assert_eq!(state.reload_ok.load(Ordering::Relaxed), 0);
+        assert_eq!(state.reload_err.load(Ordering::Relaxed), 1);
 
         // Best effort cleanup
         let _ = std::fs::remove_file(path);
@@ -420,9 +423,25 @@ direct = []
         reload_config(&state).expect("reload should succeed");
 
         // Must be updated
-        let current = state.cfg.read().expect("config lock poisoned");
+        let current = state.cfg.load();
         assert_eq!(current.defaults.egress.0, "direct");
-        drop(current);
+
+        assert_eq!(state.reload_ok.load(Ordering::Relaxed), 1);
+        assert_eq!(state.reload_err.load(Ordering::Relaxed), 0);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reload_invalid_config_returns_error_with_path() {
+        let path = tmp_path("reload-invalid-path");
+
+        write_file(&path, "this = [ is not valid toml");
+
+        let state = make_state(path.clone(), load_example_config());
+
+        let err = reload_config(&state).expect_err("reload should fail");
+        assert!(err.to_string().contains(&path.display().to_string()));
 
         let _ = std::fs::remove_file(path);
     }
