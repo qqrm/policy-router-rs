@@ -162,6 +162,67 @@ fn app_matching_case_insensitive() {
 }
 
 #[test]
+fn app_rule_matches_full_windows_path() {
+    let toml = r#"
+[defaults]
+egress = "vpn"
+
+[egress.vpn]
+type = "singbox"
+endpoint = "socks5://127.0.0.1:1488"
+
+[rules.app]
+vpn = ["zen.exe"]
+"#;
+
+    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    cfg.validate().expect("config must validate");
+
+    let d = decide(
+        &cfg,
+        Some(r"C:\Program Files\Zen\zen.exe"),
+        Some("unknown.example"),
+    );
+    assert_eq!(d.egress, eid("vpn"));
+
+    match d.reason {
+        DecisionReason::AppRule { pattern, egress } => {
+            assert_eq!(pattern, "zen.exe");
+            assert_eq!(egress, eid("vpn"));
+        }
+        other => panic!("unexpected reason: {other:?}"),
+    }
+}
+
+#[test]
+fn block_app_matches_full_windows_path() {
+    let toml = r#"
+[defaults]
+egress = "block"
+
+[egress.block]
+type = "block"
+
+[rules.app]
+block = ["bad.exe"]
+"#;
+
+    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    cfg.validate().expect("config must validate");
+
+    let d = decide(&cfg, Some(r"C:\bad.exe"), Some("youtube.com"));
+    assert_eq!(d.egress, eid("block"));
+
+    match d.reason {
+        DecisionReason::BlockByApp { pattern, egress } => {
+            assert_eq!(pattern, "bad.exe");
+            assert_eq!(egress, eid("block"));
+        }
+        other => panic!("unexpected reason: {other:?}"),
+    }
+}
+
+#[test]
 fn reason_includes_suffix_domain_match_details() {
     let cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
