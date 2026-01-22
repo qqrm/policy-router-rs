@@ -1,4 +1,6 @@
-use super::config::{AppConfig, EgressId};
+use std::collections::BTreeMap;
+
+use super::config::{AppConfig, AppPattern, DomainPattern, EgressId, EgressKind};
 
 #[derive(Debug, Clone)]
 pub struct Decision {
@@ -25,9 +27,11 @@ impl MatchKind {
 #[derive(Debug, Clone)]
 pub enum DecisionReason {
     BlockByApp {
+        egress: EgressId,
         pattern: String,
     },
     BlockByDomain {
+        egress: EgressId,
         pattern: String,
         match_kind: MatchKind,
     },
@@ -49,15 +53,20 @@ impl DecisionReason {
     #[must_use]
     pub fn to_human(&self) -> String {
         match self {
-            Self::BlockByApp { pattern } => {
-                format!("blocked: app exact match '{pattern}' has highest priority")
+            Self::BlockByApp { pattern, egress } => {
+                format!(
+                    "blocked: app exact match '{pattern}' -> egress '{egress}' has highest priority"
+                )
             }
             Self::BlockByDomain {
                 pattern,
                 match_kind,
+                egress,
             } => {
                 let mk = match_kind_to_str(*match_kind);
-                format!("blocked: domain {mk} match '{pattern}' has highest priority")
+                format!(
+                    "blocked: domain {mk} match '{pattern}' -> egress '{egress}' has highest priority"
+                )
             }
             Self::AppRule { egress, pattern } => {
                 format!("app rule: exact match '{pattern}' -> egress '{egress}'")
@@ -104,20 +113,21 @@ fn decide_block(
     domain: Option<&str>,
 ) -> Option<Decision> {
     if let Some(name) = process_name
-        && let Some(pattern) = find_case_insensitive(&cfg.rules.app.block, name)
+        && let Some((egress, pattern)) = choose_block_app(cfg, name)
     {
         return Some(Decision {
-            egress: EgressId("block".to_string()),
-            reason: DecisionReason::BlockByApp { pattern },
+            egress: egress.clone(),
+            reason: DecisionReason::BlockByApp { egress, pattern },
         });
     }
 
     if let Some(d) = domain
-        && let Some(m) = domain_matches_any(&cfg.rules.domain.block, d)
+        && let Some((egress, m)) = choose_block_domain(cfg, d)
     {
         return Some(Decision {
-            egress: EgressId("block".to_string()),
+            egress: egress.clone(),
             reason: DecisionReason::BlockByDomain {
+                egress,
                 pattern: m.pattern,
                 match_kind: m.match_kind,
             },
@@ -130,41 +140,54 @@ fn decide_block(
 fn decide_domain(cfg: &AppConfig, domain: Option<&str>) -> Option<Decision> {
     let d = domain?;
 
-    choose_domain(d, &cfg.rules.domain.vpn, "vpn")
-        .or_else(|| choose_domain(d, &cfg.rules.domain.proxy, "proxy"))
-        .or_else(|| choose_domain(d, &cfg.rules.domain.direct, "direct"))
+    choose_domain(d, cfg)
 }
 
-fn choose_domain(domain: &str, suffixes: &[String], egress: &str) -> Option<Decision> {
-    let m = domain_matches_any(suffixes, domain)?;
+fn choose_domain(domain: &str, cfg: &AppConfig) -> Option<Decision> {
+    let rules = &cfg.rules.domain;
+    for egress in ordered_non_block_rule_egresses(cfg, rules) {
+        let Some(patterns) = rules.get(egress) else {
+            continue;
+        };
+        if let Some(m) = domain_matches_any(patterns, domain) {
+            return Some(Decision {
+                egress: egress.clone(),
+                reason: DecisionReason::DomainRule {
+                    pattern: m.pattern,
+                    match_kind: m.match_kind,
+                    egress: egress.clone(),
+                },
+            });
+        }
+    }
 
-    let e = EgressId(egress.to_string());
-    Some(Decision {
-        egress: e.clone(),
-        reason: DecisionReason::DomainRule {
-            pattern: m.pattern,
-            match_kind: m.match_kind,
-            egress: e,
-        },
-    })
+    None
 }
 
 fn decide_app(cfg: &AppConfig, process_name: Option<&str>) -> Option<Decision> {
     let name = process_name?;
 
-    choose_app(name, &cfg.rules.app.vpn, "vpn")
-        .or_else(|| choose_app(name, &cfg.rules.app.proxy, "proxy"))
-        .or_else(|| choose_app(name, &cfg.rules.app.direct, "direct"))
+    choose_app(name, cfg)
 }
 
-fn choose_app(process_name: &str, names: &[String], egress: &str) -> Option<Decision> {
-    let pattern = find_case_insensitive(names, process_name)?;
+fn choose_app(process_name: &str, cfg: &AppConfig) -> Option<Decision> {
+    let rules = &cfg.rules.app;
+    for egress in ordered_non_block_rule_egresses(cfg, rules) {
+        let Some(patterns) = rules.get(egress) else {
+            continue;
+        };
+        if let Some(pattern) = find_case_insensitive(patterns, process_name) {
+            return Some(Decision {
+                egress: egress.clone(),
+                reason: DecisionReason::AppRule {
+                    pattern,
+                    egress: egress.clone(),
+                },
+            });
+        }
+    }
 
-    let e = EgressId(egress.to_string());
-    Some(Decision {
-        egress: e.clone(),
-        reason: DecisionReason::AppRule { pattern, egress: e },
-    })
+    None
 }
 
 fn decide_default(cfg: &AppConfig) -> Decision {
@@ -176,17 +199,17 @@ fn decide_default(cfg: &AppConfig) -> Decision {
     }
 }
 
-fn find_case_insensitive(list: &[String], value: &str) -> Option<String> {
+fn find_case_insensitive(list: &[AppPattern], value: &str) -> Option<String> {
     list.iter()
-        .find(|s| s.eq_ignore_ascii_case(value))
-        .map(std::string::ToString::to_string)
+        .find(|s| s.as_str().eq_ignore_ascii_case(value))
+        .map(|s| s.as_str().to_string())
 }
 
-fn domain_matches_any(suffixes: &[String], domain: &str) -> Option<DomainSuffixMatch> {
+fn domain_matches_any(suffixes: &[DomainPattern], domain: &str) -> Option<DomainSuffixMatch> {
     let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
     suffixes
         .iter()
-        .find_map(|raw| domain_matches_suffix(&d, raw))
+        .find_map(|raw| domain_matches_suffix(&d, raw.as_str()))
 }
 
 fn domain_matches_suffix(domain: &str, raw_suffix: &str) -> Option<DomainSuffixMatch> {
@@ -212,4 +235,67 @@ fn domain_matches_suffix(domain: &str, raw_suffix: &str) -> Option<DomainSuffixM
     }
 
     None
+}
+
+fn choose_block_app(cfg: &AppConfig, process_name: &str) -> Option<(EgressId, String)> {
+    for (egress, patterns) in cfg
+        .rules
+        .app
+        .iter()
+        .filter(|(id, _)| is_block_egress(cfg, id))
+    {
+        if let Some(pattern) = find_case_insensitive(patterns, process_name) {
+            return Some((egress.clone(), pattern));
+        }
+    }
+
+    None
+}
+
+fn choose_block_domain(cfg: &AppConfig, domain: &str) -> Option<(EgressId, DomainSuffixMatch)> {
+    for (egress, patterns) in cfg
+        .rules
+        .domain
+        .iter()
+        .filter(|(id, _)| is_block_egress(cfg, id))
+    {
+        if let Some(m) = domain_matches_any(patterns, domain) {
+            return Some((egress.clone(), m));
+        }
+    }
+
+    None
+}
+
+fn is_block_egress(cfg: &AppConfig, id: &EgressId) -> bool {
+    cfg.egress
+        .get(id)
+        .is_some_and(|spec| matches!(spec.kind, EgressKind::Block))
+}
+
+fn ordered_non_block_rule_egresses<'a, T>(
+    cfg: &'a AppConfig,
+    rules: &'a BTreeMap<EgressId, Vec<T>>,
+) -> Vec<&'a EgressId> {
+    let mut ordered: Vec<(&EgressId, usize)> = rules
+        .keys()
+        .filter_map(|id| {
+            let spec = cfg.egress.get(id)?;
+            let rank = match spec.kind {
+                EgressKind::Singbox => 0,
+                EgressKind::Socks5 => 1,
+                EgressKind::Direct => 2,
+                EgressKind::Block => return None,
+            };
+            Some((id, rank))
+        })
+        .collect();
+
+    ordered.sort_by(|(left_id, left_rank), (right_id, right_rank)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| left_id.cmp(right_id))
+    });
+
+    ordered.into_iter().map(|(id, _)| id).collect()
 }

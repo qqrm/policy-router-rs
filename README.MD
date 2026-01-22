@@ -178,6 +178,12 @@ Decision priority:
 3) app rules
 4) default egress
 
+For non-block rules, matching is evaluated by egress kind in a fixed order:
+Singbox first, then Socks5, then Direct. Block rules always take precedence
+and are evaluated before any non-block rules. The ordering does not depend on
+egress id names or the order of keys in the TOML file, ensuring deterministic
+results even when patterns overlap.
+
 Example outcomes:
 - `zen.exe` + `youtube.com` -> `proxy` (CIADPI)
 - `zen.exe` + `chatgpt.com` -> `vpn` (sing-box)

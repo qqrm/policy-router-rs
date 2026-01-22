@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, fs, path::Path};
 
-use anyhow::{Context, Result};
-use serde::Deserialize;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -27,7 +27,31 @@ impl AppConfig {
         let cfg: Self = toml::from_str(&raw)
             .with_context(|| format!("failed to parse TOML config: {}", path.display()))?;
 
+        cfg.validate()?;
+
         Ok(cfg)
+    }
+
+    /// Validates configuration invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if defaults or rules reference unknown egress ids.
+    pub fn validate(&self) -> Result<()> {
+        if !self.egress.contains_key(&self.defaults.egress) {
+            bail!(
+                "defaults.egress '{}' is not declared under [egress.*]",
+                self.defaults.egress
+            );
+        }
+
+        for egress_id in self.rules.app.keys().chain(self.rules.domain.keys()) {
+            if !self.egress.contains_key(egress_id) {
+                bail!("rules reference unknown egress id '{egress_id}' (missing under [egress.*])");
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -38,35 +62,35 @@ pub struct Defaults {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rules {
-    pub app: AppRules,
-    pub domain: DomainRules,
+    #[serde(default)]
+    pub app: BTreeMap<EgressId, Vec<AppPattern>>,
+    #[serde(default)]
+    pub domain: BTreeMap<EgressId, Vec<DomainPattern>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct AppRules {
-    #[serde(default)]
-    pub vpn: Vec<String>,
-    #[serde(default)]
-    pub proxy: Vec<String>,
-    #[serde(default)]
-    pub direct: Vec<String>,
-    #[serde(default)]
-    pub block: Vec<String>,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct AppPattern(pub String);
+
+impl AppPattern {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct DomainRules {
-    #[serde(default)]
-    pub vpn: Vec<String>,
-    #[serde(default)]
-    pub proxy: Vec<String>,
-    #[serde(default)]
-    pub direct: Vec<String>,
-    #[serde(default)]
-    pub block: Vec<String>,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct DomainPattern(pub String);
+
+impl DomainPattern {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(transparent)]
 pub struct EgressId(pub String);
 

@@ -283,9 +283,9 @@ const fn map_source(reason: &engine::DecisionReason) -> DecisionSource {
 
 fn map_rule_egress(reason: &engine::DecisionReason) -> String {
     match reason {
-        engine::DecisionReason::BlockByApp { .. }
-        | engine::DecisionReason::BlockByDomain { .. } => "block".to_owned(),
-        engine::DecisionReason::AppRule { egress, .. }
+        engine::DecisionReason::BlockByApp { egress, .. }
+        | engine::DecisionReason::BlockByDomain { egress, .. }
+        | engine::DecisionReason::AppRule { egress, .. }
         | engine::DecisionReason::DomainRule { egress, .. }
         | engine::DecisionReason::Default { egress } => egress.to_string(),
     }
@@ -293,7 +293,7 @@ fn map_rule_egress(reason: &engine::DecisionReason) -> String {
 
 fn map_matcher(reason: &engine::DecisionReason) -> Option<MatcherInfo> {
     match reason {
-        engine::DecisionReason::BlockByApp { pattern }
+        engine::DecisionReason::BlockByApp { pattern, .. }
         | engine::DecisionReason::AppRule { pattern, .. } => Some(MatcherInfo {
             kind: MatcherKind::Exact,
             pattern: pattern.clone(),
@@ -301,6 +301,7 @@ fn map_matcher(reason: &engine::DecisionReason) -> Option<MatcherInfo> {
         engine::DecisionReason::BlockByDomain {
             pattern,
             match_kind,
+            ..
         }
         | engine::DecisionReason::DomainRule {
             pattern,
@@ -343,7 +344,9 @@ mod tests {
 
     fn load_example_config() -> AppConfig {
         let raw = include_str!("../../config/config.example.toml");
-        toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse")
+        let cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
+        cfg.validate().expect("config.example.toml must validate");
+        cfg
     }
 
     fn make_state(config_path: PathBuf, cfg: AppConfig) -> State {
@@ -405,16 +408,10 @@ egress = "direct"
 type = "direct"
 
 [rules.app]
-vpn = []
-proxy = []
 direct = []
-block = []
 
 [rules.domain]
-vpn = []
-proxy = []
 direct = []
-block = []
 "#;
 
         write_file(&path, next_raw);
