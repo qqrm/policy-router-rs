@@ -16,7 +16,7 @@ use clap::Parser;
 use interprocess::local_socket::{
     GenericNamespaced, ListenerNonblockingMode, ListenerOptions, prelude::*,
 };
-use notify::{Event, EventKind, RecursiveMode, Watcher};
+use notify::{Event, RecursiveMode, Watcher};
 use policy_router_rs::{
     ipc::{
         DecisionInfo, DecisionSource, DiagnosticsResponse, ErrorResponse, MatcherInfo, MatcherKind,
@@ -187,10 +187,8 @@ fn run_config_watcher(state: &Arc<State>) -> Result<()> {
 
     while state.running.load(Ordering::SeqCst) {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(event)) => {
-                if should_reload_event(&event, &state.config_path) {
-                    last_event = Some(Instant::now());
-                }
+            Ok(Ok(_event)) => {
+                last_event = Some(Instant::now());
             }
             Ok(Err(err)) => {
                 warn!(error = %err, "config watch error");
@@ -213,13 +211,6 @@ fn run_config_watcher(state: &Arc<State>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn should_reload_event(event: &Event, config_path: &Path) -> bool {
-    matches!(
-        &event.kind,
-        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any
-    ) && event.paths.iter().any(|path| path == config_path)
 }
 
 fn handle_conn(state: &Arc<State>, mut conn: interprocess::local_socket::Stream) -> Result<()> {
