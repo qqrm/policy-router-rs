@@ -39,6 +39,7 @@ windows = { version = "0.60", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
 ], optional = true }
+netstat2 = "0.11.2"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
