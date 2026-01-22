@@ -12,6 +12,7 @@ keywords = ["windows", "split-tunnel", "proxy", "vpn", "routing"]
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
+arc-swap = "1.7.1"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ipnet = "2.11"
@@ -38,6 +39,7 @@ windows = { version = "0.60", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
 ], optional = true }
+netstat2 = "0.11.2"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

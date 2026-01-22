@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, fs, path::Path};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,8 +51,103 @@ impl AppConfig {
             }
         }
 
+        for (egress_id, spec) in &self.egress {
+            match spec.kind {
+                EgressKind::Singbox | EgressKind::Socks5 => {
+                    let endpoint = spec.endpoint.as_deref().ok_or_else(|| {
+                        anyhow!(
+                            "egress '{egress_id}' ({}) requires endpoint",
+                            spec.kind.as_str()
+                        )
+                    })?;
+                    let endpoint = endpoint.trim();
+                    if endpoint.is_empty() {
+                        bail!(
+                            "egress '{egress_id}' ({}) has empty endpoint",
+                            spec.kind.as_str()
+                        );
+                    }
+                    let (scheme, _host, _port) = parse_endpoint(endpoint).with_context(|| {
+                        format!(
+                            "egress '{egress_id}' ({}) has invalid endpoint '{endpoint}'",
+                            spec.kind.as_str()
+                        )
+                    })?;
+                    if scheme != "socks5" {
+                        bail!(
+                            "egress '{egress_id}' ({}) must use socks5 scheme, got '{scheme}'",
+                            spec.kind.as_str()
+                        );
+                    }
+                }
+                EgressKind::Direct | EgressKind::Block => {
+                    if spec.endpoint.is_some() {
+                        bail!(
+                            "egress '{egress_id}' ({}) must not define endpoint",
+                            spec.kind.as_str()
+                        );
+                    }
+                }
+            }
+        }
+
+        for (egress_id, patterns) in &self.rules.app {
+            for (index, pattern) in patterns.iter().enumerate() {
+                if pattern.as_str().trim().is_empty() {
+                    bail!("rules.app entry at index {index} for egress '{egress_id}' is empty");
+                }
+            }
+        }
+
+        for (egress_id, patterns) in &self.rules.domain {
+            for (index, pattern) in patterns.iter().enumerate() {
+                if pattern.as_str().trim().is_empty() {
+                    bail!("rules.domain entry at index {index} for egress '{egress_id}' is empty");
+                }
+            }
+        }
+
         Ok(())
     }
+}
+
+fn parse_endpoint(endpoint: &str) -> Result<(String, String, u16)> {
+    let (scheme, rest) = endpoint
+        .split_once("://")
+        .ok_or_else(|| anyhow!("endpoint must contain '://', got '{endpoint}'"))?;
+    if scheme.trim().is_empty() {
+        bail!("endpoint has empty scheme");
+    }
+
+    let (host, port_str) = if let Some(rest) = rest.strip_prefix('[') {
+        let close = rest
+            .find(']')
+            .ok_or_else(|| anyhow!("endpoint IPv6 host must have closing ']'"))?;
+        let host = &rest[..close];
+        let after = &rest[close + 1..];
+        let port_str = after
+            .strip_prefix(':')
+            .ok_or_else(|| anyhow!("endpoint IPv6 host must include port after ']'"))?;
+        (host, port_str)
+    } else {
+        let (host, port_str) = rest
+            .split_once(':')
+            .ok_or_else(|| anyhow!("endpoint must include port after host"))?;
+        (host, port_str)
+    };
+
+    if host.trim().is_empty() {
+        bail!("endpoint has empty host");
+    }
+
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| anyhow!("endpoint port must be a number, got '{port_str}'"))?;
+    if port == 0 {
+        bail!("endpoint port must be between 1 and 65535, got {port}");
+    }
+
+    Ok((scheme.to_string(), host.to_string(), port))
 }
 
 #[derive(Debug, Clone, Deserialize)]

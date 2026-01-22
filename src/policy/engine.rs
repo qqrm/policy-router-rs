@@ -170,13 +170,24 @@ fn decide_app(cfg: &AppConfig, process_name: Option<&str>) -> Option<Decision> {
     choose_app(name, cfg)
 }
 
+fn normalize_process_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let normalized_path = trimmed.replace('\\', "/");
+    let base_name = normalized_path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("");
+    base_name.to_ascii_lowercase()
+}
+
 fn choose_app(process_name: &str, cfg: &AppConfig) -> Option<Decision> {
+    let normalized = normalize_process_name(process_name);
     let rules = &cfg.rules.app;
     for egress in ordered_non_block_rule_egresses(cfg, rules) {
         let Some(patterns) = rules.get(egress) else {
             continue;
         };
-        if let Some(pattern) = find_case_insensitive(patterns, process_name) {
+        if let Some(pattern) = find_matching_app_pattern(patterns, &normalized) {
             return Some(Decision {
                 egress: egress.clone(),
                 reason: DecisionReason::AppRule {
@@ -199,10 +210,10 @@ fn decide_default(cfg: &AppConfig) -> Decision {
     }
 }
 
-fn find_case_insensitive(list: &[AppPattern], value: &str) -> Option<String> {
+fn find_matching_app_pattern(list: &[AppPattern], normalized_value: &str) -> Option<String> {
     list.iter()
-        .find(|s| s.as_str().eq_ignore_ascii_case(value))
-        .map(|s| s.as_str().to_string())
+        .find(|pattern| normalize_process_name(pattern.as_str()) == normalized_value)
+        .map(|pattern| pattern.as_str().to_string())
 }
 
 fn domain_matches_any(suffixes: &[DomainPattern], domain: &str) -> Option<DomainSuffixMatch> {
@@ -238,13 +249,14 @@ fn domain_matches_suffix(domain: &str, raw_suffix: &str) -> Option<DomainSuffixM
 }
 
 fn choose_block_app(cfg: &AppConfig, process_name: &str) -> Option<(EgressId, String)> {
+    let normalized = normalize_process_name(process_name);
     for (egress, patterns) in cfg
         .rules
         .app
         .iter()
         .filter(|(id, _)| is_block_egress(cfg, id))
     {
-        if let Some(pattern) = find_case_insensitive(patterns, process_name) {
+        if let Some(pattern) = find_matching_app_pattern(patterns, &normalized) {
             return Some((egress.clone(), pattern));
         }
     }
