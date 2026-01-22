@@ -1,9 +1,10 @@
 use std::{
     io::{self, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -15,6 +16,7 @@ use clap::Parser;
 use interprocess::local_socket::{
     GenericNamespaced, ListenerNonblockingMode, ListenerOptions, prelude::*,
 };
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use policy_router_rs::{
     ipc::{
         DecisionInfo, DecisionSource, DiagnosticsResponse, ErrorResponse, MatcherInfo, MatcherKind,
@@ -94,6 +96,8 @@ fn main() -> Result<()> {
         .create_sync()
         .context("failed to create IPC listener")?;
 
+    let watcher_handle = spawn_config_watcher(Arc::clone(&state));
+
     info!("started");
 
     while state.running.load(Ordering::SeqCst) {
@@ -119,6 +123,10 @@ fn main() -> Result<()> {
     info!("stopping");
 
     cleanup_fs_socket(fs_socket_path.as_ref());
+
+    if let Err(err) = watcher_handle.join() {
+        warn!(error = ?err, "config watcher thread join failed");
+    }
 
     Ok(())
 }
@@ -151,6 +159,67 @@ fn cleanup_fs_socket(path: Option<&PathBuf>) {
     if let Some(p) = path {
         let _ = std::fs::remove_file(p);
     }
+}
+
+fn spawn_config_watcher(state: Arc<State>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if let Err(err) = run_config_watcher(&state) {
+            warn!(error = %format!("{err:#}"), "config watcher stopped");
+        }
+    })
+}
+
+fn run_config_watcher(state: &Arc<State>) -> Result<()> {
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .context("failed to create config watcher")?;
+
+    let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
+
+    watcher
+        .watch(config_dir, RecursiveMode::NonRecursive)
+        .with_context(|| format!("failed to watch config directory {}", config_dir.display()))?;
+
+    let debounce = Duration::from_millis(350);
+    let mut last_event: Option<Instant> = None;
+
+    while state.running.load(Ordering::SeqCst) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(event)) => {
+                if should_reload_event(&event, &state.config_path) {
+                    last_event = Some(Instant::now());
+                }
+            }
+            Ok(Err(err)) => {
+                warn!(error = %err, "config watch error");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if let Some(since) = last_event
+            && since.elapsed() >= debounce
+        {
+            last_event = None;
+            match reload_config(state) {
+                Ok(()) => info!("reloaded config (auto)"),
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "auto reload failed");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn should_reload_event(event: &Event, config_path: &Path) -> bool {
+    matches!(
+        &event.kind,
+        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any
+    ) && event.paths.iter().any(|path| path == config_path)
 }
 
 fn handle_conn(state: &Arc<State>, mut conn: interprocess::local_socket::Stream) -> Result<()> {
