@@ -212,6 +212,7 @@ egress = "vpn"
 
 [egress.vpn]
 type = "singbox"
+endpoint = "socks5://127.0.0.1:1488"
 
 [rules.app]
 unknown = ["bad.exe"]
@@ -233,6 +234,7 @@ egress = "direct"
 
 [egress.vpn]
 type = "singbox"
+endpoint = "socks5://127.0.0.1:1488"
 
 [egress.direct]
 type = "direct"
@@ -261,6 +263,7 @@ egress = "direct"
 
 [egress.vpn]
 type = "singbox"
+endpoint = "socks5://127.0.0.1:1488"
 
 [egress.direct]
 type = "direct"
