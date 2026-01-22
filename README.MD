@@ -64,6 +64,10 @@ This separation is intentional:
 
 Daemon and client communicate via local only IPC.
 
+## Build prerequisites
+
+Building requires clang/libclang because the `netstat2` dependency uses bindgen for Windows APIs.
+
 ## CLI
 
 Daemon:
