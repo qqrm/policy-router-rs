@@ -45,11 +45,17 @@ struct State {
     started_at: Instant,
     config_path: PathBuf,
     socket: String,
-    cfg: ArcSwap<AppConfig>,
+    runtime: ArcSwap<RuntimeConfig>,
     running: AtomicBool,
     ipc_requests: std::sync::atomic::AtomicU64,
     reload_ok: std::sync::atomic::AtomicU64,
     reload_err: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Debug)]
+struct RuntimeConfig {
+    cfg: AppConfig,
+    engine: engine::CompiledEngine,
 }
 
 fn main() -> Result<()> {
@@ -65,6 +71,10 @@ fn main() -> Result<()> {
         .init();
 
     let cfg = AppConfig::load_from_path(&cli.config)?;
+    let runtime = RuntimeConfig {
+        engine: engine::CompiledEngine::compile(&cfg),
+        cfg,
+    };
 
     let socket_label = resolve_socket_label(cli.socket.as_deref());
 
@@ -72,7 +82,7 @@ fn main() -> Result<()> {
         started_at: Instant::now(),
         config_path: cli.config,
         socket: socket_label,
-        cfg: ArcSwap::from_pointee(cfg),
+        runtime: ArcSwap::from_pointee(runtime),
         running: AtomicBool::new(true),
         ipc_requests: std::sync::atomic::AtomicU64::new(0),
         reload_ok: std::sync::atomic::AtomicU64::new(0),
@@ -260,8 +270,9 @@ fn handle_request(state: &State, req: Request) -> Response {
 }
 
 fn build_status(state: &State) -> StatusResponse {
-    let cfg = state.cfg.load();
-    let egress = cfg
+    let runtime = state.runtime.load();
+    let egress = runtime
+        .cfg
         .egress
         .iter()
         .map(|(id, spec)| policy_router_rs::ipc::EgressInfo {
@@ -281,13 +292,13 @@ fn build_status(state: &State) -> StatusResponse {
 fn build_diagnostics(state: &State) -> DiagnosticsResponse {
     let uptime_ms = u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let cfg = state.cfg.load();
+    let runtime = state.runtime.load();
 
     DiagnosticsResponse {
         uptime_ms,
         config_path: state.config_path.display().to_string(),
         socket: state.socket.clone(),
-        egress_count: cfg.egress.len(),
+        egress_count: runtime.cfg.egress.len(),
         running: state.running.load(Ordering::SeqCst),
         ipc_requests: state.ipc_requests.load(std::sync::atomic::Ordering::SeqCst),
         reload_ok: state.reload_ok.load(std::sync::atomic::Ordering::SeqCst),
@@ -306,7 +317,11 @@ fn reload_config(state: &State) -> Result<()> {
         }
     };
 
-    state.cfg.store(Arc::new(next));
+    let runtime = RuntimeConfig {
+        engine: engine::CompiledEngine::compile(&next),
+        cfg: next,
+    };
+    state.runtime.store(Arc::new(runtime));
     state.reload_ok.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -322,8 +337,8 @@ fn explain(
     domain: Option<&str>,
 ) -> policy_router_rs::ipc::ExplainResponse {
     let decision = {
-        let cfg = state.cfg.load();
-        engine::decide(&cfg, process, domain)
+        let runtime = state.runtime.load();
+        runtime.engine.decide(process, domain)
     };
 
     let source = map_source(&decision.reason);
@@ -406,8 +421,7 @@ mod tests {
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
 
         std::env::temp_dir().join(format!("policy-router-{tag}-{pid}-{nanos}.toml"))
     }
@@ -420,11 +434,15 @@ mod tests {
     }
 
     fn make_state(config_path: PathBuf, cfg: AppConfig) -> State {
+        let runtime = RuntimeConfig {
+            engine: engine::CompiledEngine::compile(&cfg),
+            cfg,
+        };
         State {
             started_at: Instant::now(),
             config_path,
             socket: "test.sock".to_owned(),
-            cfg: ArcSwap::from_pointee(cfg),
+            runtime: ArcSwap::from_pointee(runtime),
             running: AtomicBool::new(true),
             ipc_requests: std::sync::atomic::AtomicU64::new(0),
             reload_ok: std::sync::atomic::AtomicU64::new(0),
@@ -450,8 +468,11 @@ mod tests {
         assert!(err.is_some());
 
         // Config must remain unchanged in memory
-        let current = state.cfg.load();
-        assert_eq!(current.defaults.egress.0, original_cfg.defaults.egress.0);
+        let current = state.runtime.load();
+        assert_eq!(
+            current.cfg.defaults.egress.0,
+            original_cfg.defaults.egress.0
+        );
 
         assert_eq!(state.reload_ok.load(Ordering::Relaxed), 0);
         assert_eq!(state.reload_err.load(Ordering::Relaxed), 1);
@@ -492,8 +513,8 @@ direct = []
         reload_config(&state).expect("reload should succeed");
 
         // Must be updated
-        let current = state.cfg.load();
-        assert_eq!(current.defaults.egress.0, "direct");
+        let current = state.runtime.load();
+        assert_eq!(current.cfg.defaults.egress.0, "direct");
 
         assert_eq!(state.reload_ok.load(Ordering::Relaxed), 1);
         assert_eq!(state.reload_err.load(Ordering::Relaxed), 0);
