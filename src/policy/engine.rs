@@ -264,7 +264,7 @@ fn compile_rule(rule: &Rule, index: usize) -> Option<CompiledRule> {
         app_normalized,
         app_raw,
         domain,
-        dst_ip_cidr: rule.dst_ip_cidr,
+        dst_ip_cidr: rule.dst_ip_cidr_parsed,
     })
 }
 
@@ -420,7 +420,7 @@ domain = ".example.com"
 
     #[test]
     fn app_domain_overrides_domain_and_app() {
-        let cfg = cfg_for_rules(
+        let mut cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -446,7 +446,7 @@ domain = "example.com"
 
     #[test]
     fn unknown_domain_falls_back_to_app() {
-        let cfg = cfg_for_rules(
+        let mut cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -467,7 +467,7 @@ app = "chat.exe"
 
     #[test]
     fn conflicting_domain_rules_are_rejected() {
-        let cfg = cfg_for_rules(
+        let mut cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -488,7 +488,7 @@ domain = ".com"
 
     #[test]
     fn dst_ip_cidr_matches_and_conflicts() {
-        let cfg = cfg_for_rules(
+        let mut cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -506,7 +506,7 @@ app = "chat.exe"
 
         assert_eq!(decision.egress, EgressId("proxy".to_string()));
 
-        let conflict_cfg = cfg_for_rules(
+        let mut conflict_cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"

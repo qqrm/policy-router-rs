@@ -1,3 +1,9 @@
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use policy_router_rs::policy::{
     config::{AppConfig, EgressId},
     engine::{DecisionReason, decide},
@@ -62,9 +68,23 @@ fn eid(s: &str) -> EgressId {
     EgressId(s.to_string())
 }
 
+fn unique_temp_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time moved backwards")
+        .as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "policy-router-{prefix}-{nanos}-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&path).expect("failed to create temp dir");
+    path
+}
+
 #[test]
 fn domain_wins_over_app() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("youtube.com"), None);
@@ -82,7 +102,7 @@ fn domain_wins_over_app() {
 
 #[test]
 fn app_used_when_no_domain_match() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("unknown.example"), None);
@@ -100,7 +120,7 @@ fn app_used_when_no_domain_match() {
 
 #[test]
 fn default_used_when_nothing_matches() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("notepad.exe"), Some("unknown.example"), None);
@@ -118,7 +138,7 @@ fn default_used_when_nothing_matches() {
 
 #[test]
 fn domain_suffix_matching_subdomains() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(
@@ -132,7 +152,7 @@ fn domain_suffix_matching_subdomains() {
 
 #[test]
 fn domain_matching_case_insensitive() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("YouTube.COM"), None);
@@ -141,7 +161,7 @@ fn domain_matching_case_insensitive() {
 
 #[test]
 fn app_matching_case_insensitive() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("ZEN.EXE"), Some("unknown.example"), None);
@@ -163,7 +183,7 @@ egress = "vpn"
 app = "zen.exe"
 "#;
 
-    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
     cfg.validate().expect("config must validate");
 
     let d = decide(
@@ -186,7 +206,7 @@ app = "zen.exe"
 
 #[test]
 fn reason_includes_suffix_domain_match_details() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(
@@ -204,7 +224,7 @@ fn reason_includes_suffix_domain_match_details() {
 
 #[test]
 fn reason_includes_exact_app_match_details() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("curl.exe"), Some("unknown.example"), None);
@@ -217,7 +237,7 @@ fn reason_includes_exact_app_match_details() {
 
 #[test]
 fn explicit_direct_app_rule() {
-    let cfg = cfg_minimal();
+    let mut cfg = cfg_minimal();
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("ciadpi.exe"), Some("youtube.com"), None);
@@ -246,7 +266,7 @@ egress = "vpn"
 domain = "example.com"
 "#;
 
-    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
     let err = cfg.validate().err();
     assert!(err.is_some());
 }
@@ -278,7 +298,7 @@ app = "zen.exe"
 domain = "example.com"
 "#;
 
-    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("example.com"), None);
@@ -308,7 +328,7 @@ domain = "youtube.com"
 name = "video"
 "#;
 
-    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
     cfg.validate().expect("config must validate");
 
     let d = decide(&cfg, None, Some("youtube.com"), None);
@@ -327,4 +347,105 @@ name = "video"
             panic!("unexpected default reason")
         }
     }
+}
+
+#[test]
+fn dst_ip_cidr_include_expands_in_order() {
+    let temp_dir = unique_temp_dir("cidr-include");
+    let cidr_path = temp_dir.join("cidrs.txt");
+    let config_path = temp_dir.join("config.toml");
+
+    fs::write(&cidr_path, "1.2.3.0/24\n5.6.7.8/32\n").expect("write cidrs");
+
+    let toml = r#"
+[defaults]
+egress = "direct"
+
+[egress.direct]
+type = "direct"
+
+[egress.proxy]
+type = "socks5"
+endpoint = "socks5://127.0.0.1:1080"
+
+[[rules]]
+egress = "proxy"
+dst_ip_cidr = "@file:cidrs.txt"
+"#;
+    fs::write(&config_path, toml).expect("write config");
+
+    let (cfg, deps) = AppConfig::load_from_path_with_deps(&config_path).expect("config must load");
+    let expected_dep = fs::canonicalize(&cidr_path).unwrap_or_else(|_| cidr_path.clone());
+    assert!(deps.contains(&expected_dep));
+
+    let d1 = decide(&cfg, None, None, Some("1.2.3.4".parse().unwrap()));
+    match d1.reason {
+        DecisionReason::RuleMatch { rule_index, .. } => {
+            assert_eq!(rule_index, 1);
+        }
+        DecisionReason::Default { .. } => panic!("unexpected default decision"),
+    }
+
+    let d2 = decide(&cfg, None, None, Some("5.6.7.8".parse().unwrap()));
+    match d2.reason {
+        DecisionReason::RuleMatch { rule_index, .. } => {
+            assert_eq!(rule_index, 2);
+        }
+        DecisionReason::Default { .. } => panic!("unexpected default decision"),
+    }
+
+    fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
+}
+
+#[test]
+fn dst_ip_cidr_include_rejects_app_include_cartesian() {
+    let temp_dir = unique_temp_dir("cidr-include-cartesian");
+    let cidr_path = temp_dir.join("cidrs.txt");
+    let app_path = temp_dir.join("apps.txt");
+    let config_path = temp_dir.join("config.toml");
+
+    fs::write(&cidr_path, "1.2.3.0/24\n5.6.7.8/32\n").expect("write cidrs");
+    fs::write(&app_path, "curl.exe\nzen.exe\n").expect("write apps");
+
+    let toml = r#"
+[defaults]
+egress = "direct"
+
+[egress.direct]
+type = "direct"
+
+[[rules]]
+egress = "direct"
+app = "@file:apps.txt"
+dst_ip_cidr = "@file:cidrs.txt"
+"#;
+    fs::write(&config_path, toml).expect("write config");
+
+    let err = AppConfig::load_from_path(&config_path).expect_err("cartesian include must fail");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("dst_ip_cidr"));
+    assert!(msg.contains("cartesian"));
+
+    fs::remove_dir_all(&temp_dir).expect("cleanup temp dir");
+}
+
+#[test]
+fn invalid_dst_ip_cidr_is_rejected() {
+    let toml = r#"
+[defaults]
+egress = "direct"
+
+[egress.direct]
+type = "direct"
+
+[[rules]]
+egress = "direct"
+dst_ip_cidr = "not-a-cidr"
+"#;
+
+    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    let err = cfg.validate().expect_err("config must reject invalid CIDR");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("dst_ip_cidr"));
+    assert!(msg.contains("valid CIDR"));
 }

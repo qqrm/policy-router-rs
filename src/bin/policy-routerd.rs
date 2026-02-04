@@ -689,7 +689,7 @@ mod tests {
 
     fn load_example_config() -> AppConfig {
         let raw = include_str!("../../config/config.example.toml");
-        let cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
+        let mut cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
         cfg.validate().expect("config.example.toml must validate");
         cfg
     }

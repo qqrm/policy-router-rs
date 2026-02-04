@@ -20,7 +20,7 @@ type = "socks5"
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -32,7 +32,7 @@ type = "singbox"
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -45,7 +45,7 @@ endpoint = "socks5://127.0.0.1:1080"
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -58,7 +58,7 @@ endpoint = "socks5://127.0.0.1:1080"
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -80,7 +80,7 @@ endpoint = "{endpoint}"
             ),
             "",
         );
-        let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+        let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
         assert!(cfg.validate().is_err());
     }
 }
@@ -101,7 +101,7 @@ egress = "main"
 domain = "   "
 "#,
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -117,7 +117,7 @@ program = "   "
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -136,7 +136,7 @@ max_restarts_per_minute = 1
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
 
@@ -155,6 +155,6 @@ max_restarts_per_minute = 0
 "#,
         "",
     );
-    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
