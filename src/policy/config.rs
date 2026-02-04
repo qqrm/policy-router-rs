@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -12,7 +13,8 @@ pub struct AppConfig {
     pub defaults: Defaults,
     #[serde(default)]
     pub egress: BTreeMap<EgressId, EgressSpec>,
-    pub rules: Rules,
+    #[serde(default)]
+    pub rules: Vec<Rule>,
 }
 
 const INCLUDE_PREFIX: &str = "@file:";
@@ -67,46 +69,83 @@ impl AppConfig {
         base_dir: &Path,
         deps: &mut Vec<PathBuf>,
     ) -> Result<()> {
-        expand_rule_map_domain(&mut self.rules.domain, base_dir, deps)?;
-        expand_rule_map_app(&mut self.rules.app, base_dir, deps)?;
+        expand_rule_list(&mut self.rules, base_dir, deps)?;
         Ok(())
     }
 }
 
-fn expand_rule_map_app(
-    map: &mut BTreeMap<EgressId, Vec<AppPattern>>,
-    base_dir: &Path,
-    deps: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for patterns in map.values_mut() {
-        let mut out: Vec<String> = Vec::new();
-        let mut stack: HashSet<PathBuf> = HashSet::new();
+fn expand_rule_list(rules: &mut Vec<Rule>, base_dir: &Path, deps: &mut Vec<PathBuf>) -> Result<()> {
+    let mut expanded = Vec::new();
+    for (index, rule) in rules.iter().enumerate() {
+        let app_values =
+            expand_rule_field(rule.app.as_ref().map(AppPattern::as_str), base_dir, deps)
+                .with_context(|| format!("failed to expand rules[{index}].app includes"))?;
+        let domain_values = expand_rule_field(
+            rule.domain.as_ref().map(DomainPattern::as_str),
+            base_dir,
+            deps,
+        )
+        .with_context(|| format!("failed to expand rules[{index}].domain includes"))?;
 
-        for p in patterns.iter() {
-            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, deps, &mut out)?;
+        if app_values.is_empty() && rule.app.is_some() {
+            bail!("rules[{index}].app include expanded to no patterns");
+        }
+        if domain_values.is_empty() && rule.domain.is_some() {
+            bail!("rules[{index}].domain include expanded to no patterns");
         }
 
-        *patterns = out.into_iter().map(AppPattern).collect();
+        if app_values.len() > 1 && domain_values.len() > 1 {
+            bail!(
+                "rules[{index}] contains includes for both app and domain; \
+expand one field per rule to avoid cartesian expansion"
+            );
+        }
+
+        let app_values = if app_values.is_empty() {
+            vec![None]
+        } else {
+            app_values
+                .into_iter()
+                .map(|value| Some(AppPattern(value)))
+                .collect()
+        };
+        let domain_values = if domain_values.is_empty() {
+            vec![None]
+        } else {
+            domain_values
+                .into_iter()
+                .map(|value| Some(DomainPattern(value)))
+                .collect()
+        };
+
+        for app_value in &app_values {
+            for domain_value in &domain_values {
+                expanded.push(Rule {
+                    egress: rule.egress.clone(),
+                    app: app_value.clone(),
+                    domain: domain_value.clone(),
+                    dst_ip_cidr: rule.dst_ip_cidr,
+                    name: rule.name.clone(),
+                });
+            }
+        }
     }
+    *rules = expanded;
     Ok(())
 }
 
-fn expand_rule_map_domain(
-    map: &mut BTreeMap<EgressId, Vec<DomainPattern>>,
+fn expand_rule_field(
+    raw: Option<&str>,
     base_dir: &Path,
     deps: &mut Vec<PathBuf>,
-) -> Result<()> {
-    for patterns in map.values_mut() {
-        let mut out: Vec<String> = Vec::new();
-        let mut stack: HashSet<PathBuf> = HashSet::new();
-
-        for p in patterns.iter() {
-            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, deps, &mut out)?;
-        }
-
-        *patterns = out.into_iter().map(DomainPattern).collect();
-    }
-    Ok(())
+) -> Result<Vec<String>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut stack: HashSet<PathBuf> = HashSet::new();
+    expand_pattern_entry(raw, base_dir, &mut stack, 0, deps, &mut out)?;
+    Ok(out)
 }
 
 fn expand_pattern_entry(
@@ -222,9 +261,12 @@ impl AppConfig {
             );
         }
 
-        for egress_id in self.rules.app.keys().chain(self.rules.domain.keys()) {
-            if !self.egress.contains_key(egress_id) {
-                bail!("rules reference unknown egress id '{egress_id}' (missing under [egress.*])");
+        for (index, rule) in self.rules.iter().enumerate() {
+            if !self.egress.contains_key(&rule.egress) {
+                bail!(
+                    "rules[{index}] references unknown egress id '{}' (missing under [egress.*])",
+                    rule.egress
+                );
             }
         }
 
@@ -286,21 +328,82 @@ impl AppConfig {
             }
         }
 
-        for (egress_id, patterns) in &self.rules.app {
-            for (index, pattern) in patterns.iter().enumerate() {
-                if pattern.as_str().trim().is_empty() {
-                    bail!("rules.app entry at index {index} for egress '{egress_id}' is empty");
+        self.validate_rules()?;
+
+        Ok(())
+    }
+}
+
+impl AppConfig {
+    fn validate_rules(&self) -> Result<()> {
+        let mut app_domain_rules = Vec::new();
+        let mut domain_rules = Vec::new();
+        let mut dst_ip_rules = Vec::new();
+        let mut app_rules = Vec::new();
+
+        for (index, rule) in self.rules.iter().enumerate() {
+            let position = index + 1;
+
+            if let Some(app) = rule.app.as_ref()
+                && app.as_str().trim().is_empty()
+            {
+                bail!("rules[{index}].app is empty");
+            }
+            if let Some(domain) = rule.domain.as_ref()
+                && domain.as_str().trim().is_empty()
+            {
+                bail!("rules[{index}].domain is empty");
+            }
+
+            if rule.dst_ip_cidr.is_some() && (rule.app.is_some() || rule.domain.is_some()) {
+                bail!(
+                    "rules[{index}] mixes dst_ip_cidr with app/domain matchers; \
+use dst_ip_cidr alone or split into separate rules"
+                );
+            }
+
+            if rule.app.is_none() && rule.domain.is_none() && rule.dst_ip_cidr.is_none() {
+                bail!("rules[{index}] must set at least one matcher (app, domain, dst_ip_cidr)");
+            }
+
+            let app_normalized = rule
+                .app
+                .as_ref()
+                .map(|app| normalize_process_name(app.as_str()));
+            let domain_suffix = rule
+                .domain
+                .as_ref()
+                .and_then(|domain| normalize_domain_pattern(domain.as_str()));
+
+            if rule.domain.is_some() && domain_suffix.is_none() {
+                bail!("rules[{index}].domain is empty after normalization");
+            }
+
+            let tier = rule_tier(rule);
+            let info = RuleInfo {
+                index: position,
+                rule,
+                app_normalized,
+                domain_suffix,
+            };
+
+            match tier {
+                RuleTier::AppDomain => app_domain_rules.push(info),
+                RuleTier::Domain => domain_rules.push(info),
+                RuleTier::DstIp => dst_ip_rules.push(info),
+                RuleTier::App => app_rules.push(info),
+                RuleTier::Default => {
+                    bail!(
+                        "rules[{index}] is a catch-all; defaults.egress already defines the default"
+                    );
                 }
             }
         }
 
-        for (egress_id, patterns) in &self.rules.domain {
-            for (index, pattern) in patterns.iter().enumerate() {
-                if pattern.as_str().trim().is_empty() {
-                    bail!("rules.domain entry at index {index} for egress '{egress_id}' is empty");
-                }
-            }
-        }
+        detect_conflicts_app_domain(&app_domain_rules)?;
+        detect_conflicts_domain(&domain_rules)?;
+        detect_conflicts_app(&app_rules)?;
+        detect_conflicts_dst_ip(&dst_ip_rules)?;
 
         Ok(())
     }
@@ -351,11 +454,16 @@ pub struct Defaults {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Rules {
+pub struct Rule {
+    pub egress: EgressId,
     #[serde(default)]
-    pub app: BTreeMap<EgressId, Vec<AppPattern>>,
+    pub app: Option<AppPattern>,
     #[serde(default)]
-    pub domain: BTreeMap<EgressId, Vec<DomainPattern>>,
+    pub domain: Option<DomainPattern>,
+    #[serde(default)]
+    pub dst_ip_cidr: Option<IpNet>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -378,6 +486,240 @@ impl DomainPattern {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleTier {
+    AppDomain,
+    Domain,
+    DstIp,
+    App,
+    Default,
+}
+
+impl RuleTier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AppDomain => "app+domain",
+            Self::Domain => "domain",
+            Self::DstIp => "dst_ip_cidr",
+            Self::App => "app",
+            Self::Default => "default",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RuleInfo<'a> {
+    index: usize,
+    rule: &'a Rule,
+    app_normalized: Option<String>,
+    domain_suffix: Option<String>,
+}
+
+const fn rule_tier(rule: &Rule) -> RuleTier {
+    match (
+        rule.app.is_some(),
+        rule.domain.is_some(),
+        rule.dst_ip_cidr.is_some(),
+    ) {
+        (true, true, false) => RuleTier::AppDomain,
+        (false, true, false) => RuleTier::Domain,
+        (false, false, true) => RuleTier::DstIp,
+        (true, false, false) => RuleTier::App,
+        _ => RuleTier::Default,
+    }
+}
+
+pub(crate) fn normalize_process_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let normalized_path = trimmed.replace('\\', "/");
+    let base_name = normalized_path
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("");
+    base_name.to_ascii_lowercase()
+}
+
+pub(crate) fn normalize_domain(raw: &str) -> String {
+    raw.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn normalize_domain_pattern(raw: &str) -> Option<String> {
+    let suffix_raw = normalize_domain(raw);
+    if suffix_raw.is_empty() {
+        return None;
+    }
+    Some(
+        suffix_raw
+            .strip_prefix('.')
+            .unwrap_or(suffix_raw.as_str())
+            .to_string(),
+    )
+}
+
+fn domain_suffix_overlaps(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    domain_is_suffix(left, right) || domain_is_suffix(right, left)
+}
+
+fn domain_is_suffix(domain: &str, suffix: &str) -> bool {
+    if domain.len() <= suffix.len() {
+        return false;
+    }
+    if !domain.ends_with(suffix) {
+        return false;
+    }
+    let prefix_end = domain.len() - suffix.len();
+    domain
+        .as_bytes()
+        .get(prefix_end - 1)
+        .is_some_and(|b| *b == b'.')
+}
+
+fn detect_conflicts_app_domain(rules: &[RuleInfo<'_>]) -> Result<()> {
+    for (i, left) in rules.iter().enumerate() {
+        for right in rules.iter().skip(i + 1) {
+            let Some(left_app) = left.app_normalized.as_ref() else {
+                continue;
+            };
+            let Some(right_app) = right.app_normalized.as_ref() else {
+                continue;
+            };
+            if left_app != right_app {
+                continue;
+            }
+            let Some(left_domain) = left.domain_suffix.as_ref() else {
+                continue;
+            };
+            let Some(right_domain) = right.domain_suffix.as_ref() else {
+                continue;
+            };
+            if domain_suffix_overlaps(left_domain, right_domain) {
+                bail_conflict(
+                    RuleTier::AppDomain,
+                    left,
+                    right,
+                    "make domain patterns non-overlapping or merge the rules",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn detect_conflicts_domain(rules: &[RuleInfo<'_>]) -> Result<()> {
+    for (i, left) in rules.iter().enumerate() {
+        for right in rules.iter().skip(i + 1) {
+            let Some(left_domain) = left.domain_suffix.as_ref() else {
+                continue;
+            };
+            let Some(right_domain) = right.domain_suffix.as_ref() else {
+                continue;
+            };
+            if domain_suffix_overlaps(left_domain, right_domain) {
+                bail_conflict(
+                    RuleTier::Domain,
+                    left,
+                    right,
+                    "make domain patterns non-overlapping or merge the rules",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn detect_conflicts_app(rules: &[RuleInfo<'_>]) -> Result<()> {
+    for (i, left) in rules.iter().enumerate() {
+        for right in rules.iter().skip(i + 1) {
+            let Some(left_app) = left.app_normalized.as_ref() else {
+                continue;
+            };
+            let Some(right_app) = right.app_normalized.as_ref() else {
+                continue;
+            };
+            if left_app == right_app {
+                bail_conflict(
+                    RuleTier::App,
+                    left,
+                    right,
+                    "remove or merge one of the duplicate app rules",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn detect_conflicts_dst_ip(rules: &[RuleInfo<'_>]) -> Result<()> {
+    for (i, left) in rules.iter().enumerate() {
+        let Some(left_net) = left.rule.dst_ip_cidr.as_ref() else {
+            continue;
+        };
+        for right in rules.iter().skip(i + 1) {
+            let Some(right_net) = right.rule.dst_ip_cidr.as_ref() else {
+                continue;
+            };
+            if cidr_overlaps(left_net, right_net) {
+                bail_conflict(
+                    RuleTier::DstIp,
+                    left,
+                    right,
+                    "use non-overlapping CIDRs or merge the rules",
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cidr_overlaps(left: &IpNet, right: &IpNet) -> bool {
+    let left_v4 = matches!(left, IpNet::V4(_));
+    let right_v4 = matches!(right, IpNet::V4(_));
+    if left_v4 != right_v4 {
+        return false;
+    }
+    left.contains(&right.network()) || right.contains(&left.network())
+}
+
+fn bail_conflict(
+    tier: RuleTier,
+    left: &RuleInfo<'_>,
+    right: &RuleInfo<'_>,
+    hint: &str,
+) -> Result<()> {
+    bail!(
+        "conflicting rules in tier '{}':\n\
+  - rule #{left_idx}: {left_rule}\n\
+  - rule #{right_idx}: {right_rule}\n\
+Hint: {hint}",
+        tier.as_str(),
+        left_idx = left.index,
+        left_rule = format_rule(left.rule),
+        right_idx = right.index,
+        right_rule = format_rule(right.rule),
+    );
+}
+
+fn format_rule(rule: &Rule) -> String {
+    let mut parts = vec![format!("egress='{}'", rule.egress)];
+    if let Some(name) = &rule.name {
+        parts.push(format!("name='{name}'"));
+    }
+    if let Some(app) = &rule.app {
+        parts.push(format!("app='{}'", app.as_str().trim()));
+    }
+    if let Some(domain) = &rule.domain {
+        parts.push(format!("domain='{}'", domain.as_str().trim()));
+    }
+    if let Some(cidr) = &rule.dst_ip_cidr {
+        parts.push(format!("dst_ip_cidr='{cidr}'"));
+    }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]

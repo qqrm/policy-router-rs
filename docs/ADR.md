@@ -52,8 +52,9 @@ Decision: **Two-stage matching: precedence by specificity, top-to-bottom within 
 Tiers (in evaluation order):
 1) `app + domain` rules
 2) `domain` rules
-3) `app` rules
-4) `default`
+3) `dst_ip_cidr` rules
+4) `app` rules
+5) `default`
 
 Within each tier: **evaluate rules top-to-bottom; first match wins.**
 

@@ -40,6 +40,8 @@ enum Cmd {
         process: Option<String>,
         #[arg(long)]
         domain: Option<String>,
+        #[arg(long)]
+        dst_ip: Option<String>,
     },
 }
 
@@ -54,7 +56,15 @@ fn main() -> Result<()> {
         Cmd::Reload => Request::Reload,
         Cmd::Stop => Request::Stop,
         Cmd::Diagnostics => Request::Diagnostics,
-        Cmd::Explain { process, domain } => Request::Explain(ExplainRequest { process, domain }),
+        Cmd::Explain {
+            process,
+            domain,
+            dst_ip,
+        } => Request::Explain(ExplainRequest {
+            process,
+            domain,
+            dst_ip,
+        }),
     };
 
     let resp = client_roundtrip(&mut conn, &req)?;

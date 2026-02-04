@@ -18,12 +18,7 @@ fn validate_rejects_missing_endpoint_for_socks5() {
         r#"[egress.main]
 type = "socks5"
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
@@ -35,12 +30,7 @@ fn validate_rejects_missing_endpoint_for_singbox() {
         r#"[egress.main]
 type = "singbox"
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
@@ -53,12 +43,7 @@ fn validate_rejects_endpoint_for_direct() {
 type = "direct"
 endpoint = "socks5://127.0.0.1:1080"
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
@@ -71,12 +56,7 @@ fn validate_rejects_endpoint_for_block() {
 type = "block"
 endpoint = "socks5://127.0.0.1:1080"
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
@@ -98,12 +78,7 @@ type = "socks5"
 endpoint = "{endpoint}"
 "#
             ),
-            r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+            "",
         );
         let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
         assert!(cfg.validate().is_err());
@@ -116,11 +91,14 @@ fn validate_rejects_empty_patterns() {
         r#"[egress.main]
 type = "direct"
 "#,
-        r#"[rules.app]
-main = [""]
+        r#"
+[[rules]]
+egress = "main"
+app = ""
 
-[rules.domain]
-main = ["   "]
+[[rules]]
+egress = "main"
+domain = "   "
 "#,
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
@@ -137,12 +115,7 @@ type = "direct"
 enabled = true
 program = "   "
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
@@ -161,12 +134,7 @@ backoff_ms = 0
 max_backoff_ms = 10
 max_restarts_per_minute = 1
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
@@ -185,12 +153,7 @@ backoff_ms = 10
 max_backoff_ms = 10
 max_restarts_per_minute = 0
 "#,
-        r"[rules.app]
-main = []
-
-[rules.domain]
-main = []
-",
+        "",
     );
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());

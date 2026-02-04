@@ -18,6 +18,10 @@ struct Args {
     /// Domain (example: youtube.com)
     #[arg(long)]
     domain: Option<String>,
+
+    /// Destination IP (example: 203.0.113.10)
+    #[arg(long)]
+    dst_ip: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -29,7 +33,20 @@ fn main() -> Result<()> {
     tracing::info!(config = %config_path.display(), "using config");
     let cfg = AppConfig::load_from_path(&config_path)?;
 
-    let decision = engine::decide(&cfg, args.process.as_deref(), args.domain.as_deref());
+    let dst_ip = match args.dst_ip.as_deref() {
+        Some(raw) => Some(
+            raw.parse()
+                .with_context(|| format!("invalid dst_ip '{raw}' (expected an IP address)"))?,
+        ),
+        None => None,
+    };
+
+    let decision = engine::decide(
+        &cfg,
+        args.process.as_deref(),
+        args.domain.as_deref(),
+        dst_ip,
+    );
 
     let egress_id = decision.egress.clone();
     let spec = cfg

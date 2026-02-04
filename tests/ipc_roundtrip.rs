@@ -189,6 +189,7 @@ fn ipc_explain_roundtrip() -> Result<()> {
     let req = Request::Explain(ExplainRequest {
         process: Some("chrome.exe".to_owned()),
         domain: Some("youtube.com".to_owned()),
+        dst_ip: None,
     });
 
     let resp = client_roundtrip(&mut conn, &req)?;

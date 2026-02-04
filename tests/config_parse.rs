@@ -32,12 +32,6 @@ restart = "on-failure"
 backoff_ms = 500
 max_backoff_ms = 10_000
 max_restarts_per_minute = 5
-
-[rules.app]
-vpn = []
-
-[rules.domain]
-vpn = []
 "#;
     let cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
     cfg.validate().expect("config must validate");
@@ -63,12 +57,6 @@ type = "direct"
 
 [egress.direct.process]
 enabled = false
-
-[rules.app]
-direct = []
-
-[rules.domain]
-direct = []
 "#;
     let cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
     cfg.validate().expect("config must validate");
@@ -150,13 +138,17 @@ endpoint = "socks5://127.0.0.1:1488"
 [egress.direct]
 type = "direct"
 
-[rules.domain]
-vpn = ["@file:a.txt"]
-direct = ["ru"]
+[[rules]]
+egress = "vpn"
+domain = "@file:a.txt"
 
-[rules.app]
-vpn = ["@file:apps.txt"]
-direct = []
+[[rules]]
+egress = "direct"
+domain = "ru"
+
+[[rules]]
+egress = "vpn"
+app = "@file:apps.txt"
 "#,
     )
     .expect("write config.toml");
@@ -170,33 +162,25 @@ direct = []
         .collect();
     assert_eq!(dep_names, vec!["a.txt", "b.txt", "apps.txt"]);
 
-    let vpn_domains = cfg
+    let vpn_domains: Vec<&str> = cfg
         .rules
-        .domain
-        .get(&policy_router_rs::policy::config::EgressId(
-            "vpn".to_string(),
-        ))
-        .expect("vpn domain rules exist");
-    let got: Vec<&str> = vpn_domains
         .iter()
-        .map(policy_router_rs::policy::config::DomainPattern::as_str)
+        .filter(|rule| rule.egress.0 == "vpn" && rule.domain.is_some())
+        .map(|rule| rule.domain.as_ref().unwrap().as_str())
         .collect();
 
-    // Order matters: expanded in order: b.txt entries first (via @file), then youtube.com line
-    assert_eq!(got, vec!["googlevideo.com", "ytimg.com", "youtube.com"]);
+    assert_eq!(
+        vpn_domains,
+        vec!["googlevideo.com", "ytimg.com", "youtube.com"]
+    );
 
-    let vpn_apps = cfg
+    let vpn_apps: Vec<&str> = cfg
         .rules
-        .app
-        .get(&policy_router_rs::policy::config::EgressId(
-            "vpn".to_string(),
-        ))
-        .expect("vpn app rules exist");
-    let got_apps: Vec<&str> = vpn_apps
         .iter()
-        .map(policy_router_rs::policy::config::AppPattern::as_str)
+        .filter(|rule| rule.egress.0 == "vpn" && rule.app.is_some())
+        .map(|rule| rule.app.as_ref().unwrap().as_str())
         .collect();
-    assert_eq!(got_apps, vec!["zen.exe", "Telegram.exe"]);
+    assert_eq!(vpn_apps, vec!["zen.exe", "Telegram.exe"]);
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -229,11 +213,9 @@ egress = "vpn"
 type = "singbox"
 endpoint = "socks5://127.0.0.1:1488"
 
-[rules.domain]
-vpn = ["@file:a.txt"]
-
-[rules.app]
-vpn = []
+[[rules]]
+egress = "vpn"
+domain = "@file:a.txt"
 "#,
     )
     .expect("write config.toml");
@@ -278,11 +260,9 @@ egress = "vpn"
 type = "singbox"
 endpoint = "socks5://127.0.0.1:1488"
 
-[rules.domain]
-vpn = ["@file:f0.txt"]
-
-[rules.app]
-vpn = []
+[[rules]]
+egress = "vpn"
+domain = "@file:f0.txt"
 "#,
     )
     .expect("write config.toml");

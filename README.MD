@@ -173,21 +173,26 @@ Enforcement (minimal, evolving):
 
 ## Configuration (concept)
 
-Two rule dimensions:
+Rules are defined as an ordered list of `[[rules]]` entries. Each rule sets an `egress`
+and one matcher (`app`, `domain`, or `dst_ip_cidr`), or `app + domain` together for the
+most specific tier.
+
+Rule dimensions:
 - app rules: `process_name -> egress`
 - domain rules: `domain_suffix -> egress`
+- dst_ip_cidr rules: `destination_ip/cidr -> egress`
 
-Decision priority:
-1) block rules (app, domain)
-2) domain rules
-3) app rules
-4) default egress
+Rules are evaluated in specificity tiers, top-to-bottom within each tier:
+1) `app + domain`
+2) `domain`
+3) `dst_ip_cidr`
+4) `app`
+5) default egress
 
-For non-block rules, matching is evaluated by egress kind in a fixed order:
-Singbox first, then Socks5, then Direct. Block rules always take precedence
-and are evaluated before any non-block rules. The ordering does not depend on
-egress id names or the order of keys in the TOML file, ensuring deterministic
-results even when patterns overlap.
+Within a tier, rules are evaluated in the exact order they appear in the config; the first
+match wins. Rules that overlap in the same tier are rejected at config validation time with
+clear diagnostics (ordering is not used to resolve conflicts). If a domain is unknown, only
+app rules can match; otherwise default applies.
 
 Example outcomes:
 - `zen.exe` + `youtube.com` -> `proxy` (CIADPI)
@@ -201,12 +206,13 @@ This repo is intentionally split into incremental phases so each slice is review
 
 Current status (implemented and test-covered)
 - Policy engine
-  - Rule precedence: block > (domain/app) > default
-  - Deterministic matching with exact + suffix match kinds
-  - CompiledEngine fast-path verified against slow decisions by tests
+  - Tiered matching: app+domain > domain > dst_ip_cidr > app > default
+  - First-match-wins within each tier, preserving config order
+  - Deterministic matching with exact + suffix match kinds for domains
+  - Strict conflict validation for overlapping rules in the same tier
 - Config
-  - TOML config parsing + strict validation (egress ids, endpoint format)
-  - Include lists via "@file:<path>" inside rule arrays
+  - TOML config parsing + strict validation (egress ids, endpoint format, rule overlaps)
+  - Include lists via "@file:<path>" inside app/domain rule fields
     - Relative to the including file, nested includes supported
     - Cycle detection + max depth limit (MAX_INCLUDE_DEPTH = 16)
     - Include dependencies are discovered and returned (best-effort canonicalized)
