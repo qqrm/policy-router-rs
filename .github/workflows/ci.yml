@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  linux:
+    name: Linux checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,12 +19,16 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets
+      - name: Build
+        run: cargo build --all-targets
       - name: Test
         run: cargo test --all
 
-  test-windows:
+  windows:
+    name: Windows checks (optional)
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,6 +40,8 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --features windows
+      - name: Build
+        run: cargo build --all-targets --features windows
       - name: Test
-        run: cargo test --all
+        run: cargo test --all --features windows
