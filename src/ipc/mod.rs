@@ -69,6 +69,8 @@ pub enum Request {
 pub struct ExplainRequest {
     pub process: Option<String>,
     pub domain: Option<String>,
+    #[serde(default)]
+    pub dst_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,9 +149,9 @@ pub struct DecisionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionSource {
-    BlockApp,
-    BlockDomain,
+    AppDomainRule,
     DomainRule,
+    DstIpCidrRule,
     AppRule,
     Default,
 }
@@ -166,6 +168,7 @@ pub struct MatcherInfo {
 pub enum MatcherKind {
     Exact,
     Suffix,
+    Cidr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

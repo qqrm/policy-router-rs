@@ -26,32 +26,37 @@ type = "direct"
 [egress.block]
 type = "block"
 
-# You can include external rule lists using "@file:<path>" inside the arrays.
+# You can include external rule lists using "@file:<path>" in app/domain fields.
 # Paths are resolved relative to this config file. Include files are line-based:
 # - empty lines and lines starting with #, ;, or // are ignored
 # - inline comments after # or ; are stripped
 # Example:
-# vpn = ["@file:lists/vpn_apps.txt"]
-[rules.app]
-vpn = ["zen.exe", "Telegram.exe", "Element.exe"]
-proxy = []
-direct = ["ciadpi.exe"]
-block = []
+# app = "@file:lists/vpn_apps.txt"
 
-[rules.domain]
-vpn = ["chatgpt.com", "discord.com", "github.com"]
+[[rules]]
+egress = "vpn"
+app = "zen.exe"
 
-proxy = [
-    "youtube.com",
-    "youtu.be",
-    "googlevideo.com",
-    "ytimg.com",
-    "ggpht.com",
-    "gvt1.com",
-    "youtube-nocookie.com",
-    "youtubei.googleapis.com",
-    "youtube.googleapis.com",
-]
+[[rules]]
+egress = "vpn"
+domain = "chatgpt.com"
 
-direct = ["ru", "рф", "su", ".lan"]
-block = []
+[[rules]]
+egress = "proxy"
+domain = "youtube.com"
+
+[[rules]]
+egress = "proxy"
+domain = "googlevideo.com"
+
+[[rules]]
+egress = "direct"
+app = "ciadpi.exe"
+
+[[rules]]
+egress = "direct"
+domain = ".lan"
+
+[[rules]]
+egress = "block"
+dst_ip_cidr = "10.0.0.0/24"

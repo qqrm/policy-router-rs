@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io::{self, BufReader},
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -24,7 +25,10 @@ use policy_router_rs::{
         ProcessStatus, Request, Response, SOCKET_ENV_VAR, StatusResponse, read_json_line,
         write_json_line,
     },
-    policy::{config::AppConfig, engine},
+    policy::{
+        config::{AppConfig, RuleTier},
+        engine,
+    },
     supervisor::{DesiredProcess, Supervisor, SupervisorCmd},
 };
 use tracing::{info, warn};
@@ -525,7 +529,19 @@ fn reload_config(state: &State) -> Result<()> {
 }
 
 fn handle_explain(state: &State, req: &policy_router_rs::ipc::ExplainRequest) -> Response {
-    let decision = explain(state, req.process.as_deref(), req.domain.as_deref());
+    let dst_ip = match req.dst_ip.as_deref() {
+        Some(raw) => match raw.parse::<IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(_) => {
+                return Response::Err(ErrorResponse {
+                    message: format!("invalid dst_ip '{raw}' (expected IP address)"),
+                });
+            }
+        },
+        None => None,
+    };
+
+    let decision = explain(state, req.process.as_deref(), req.domain.as_deref(), dst_ip);
     Response::OkExplain(decision)
 }
 
@@ -533,10 +549,11 @@ fn explain(
     state: &State,
     process: Option<&str>,
     domain: Option<&str>,
+    dst_ip: Option<IpAddr>,
 ) -> policy_router_rs::ipc::ExplainResponse {
     let decision = {
         let runtime = state.runtime.load();
-        runtime.engine.decide(process, domain)
+        runtime.engine.decide(process, domain, dst_ip)
     };
 
     let source = map_source(&decision.reason);
@@ -556,44 +573,49 @@ fn explain(
 
 const fn map_source(reason: &engine::DecisionReason) -> DecisionSource {
     match reason {
-        engine::DecisionReason::BlockByApp { .. } => DecisionSource::BlockApp,
-        engine::DecisionReason::BlockByDomain { .. } => DecisionSource::BlockDomain,
-        engine::DecisionReason::AppRule { .. } => DecisionSource::AppRule,
-        engine::DecisionReason::DomainRule { .. } => DecisionSource::DomainRule,
+        engine::DecisionReason::RuleMatch { tier, .. } => match tier {
+            RuleTier::AppDomain => DecisionSource::AppDomainRule,
+            RuleTier::Domain => DecisionSource::DomainRule,
+            RuleTier::DstIp => DecisionSource::DstIpCidrRule,
+            RuleTier::App => DecisionSource::AppRule,
+            RuleTier::Default => DecisionSource::Default,
+        },
         engine::DecisionReason::Default { .. } => DecisionSource::Default,
     }
 }
 
 fn map_rule_egress(reason: &engine::DecisionReason) -> String {
     match reason {
-        engine::DecisionReason::BlockByApp { egress, .. }
-        | engine::DecisionReason::BlockByDomain { egress, .. }
-        | engine::DecisionReason::AppRule { egress, .. }
-        | engine::DecisionReason::DomainRule { egress, .. }
+        engine::DecisionReason::RuleMatch { egress, .. }
         | engine::DecisionReason::Default { egress } => egress.to_string(),
     }
 }
 
 fn map_matcher(reason: &engine::DecisionReason) -> Option<MatcherInfo> {
     match reason {
-        engine::DecisionReason::BlockByApp { pattern, .. }
-        | engine::DecisionReason::AppRule { pattern, .. } => Some(MatcherInfo {
-            kind: MatcherKind::Exact,
-            pattern: pattern.clone(),
-        }),
-        engine::DecisionReason::BlockByDomain {
-            pattern,
-            match_kind,
+        engine::DecisionReason::RuleMatch {
+            app,
+            domain,
+            dst_ip_cidr,
             ..
+        } => {
+            if let Some(domain) = domain {
+                return Some(MatcherInfo {
+                    kind: map_matcher_kind(domain.match_kind),
+                    pattern: domain.pattern.clone(),
+                });
+            }
+            if let Some(cidr) = dst_ip_cidr {
+                return Some(MatcherInfo {
+                    kind: MatcherKind::Cidr,
+                    pattern: cidr.to_string(),
+                });
+            }
+            app.as_ref().map(|pattern| MatcherInfo {
+                kind: MatcherKind::Exact,
+                pattern: pattern.clone(),
+            })
         }
-        | engine::DecisionReason::DomainRule {
-            pattern,
-            match_kind,
-            ..
-        } => Some(MatcherInfo {
-            kind: map_matcher_kind(*match_kind),
-            pattern: pattern.clone(),
-        }),
         engine::DecisionReason::Default { .. } => None,
     }
 }
@@ -734,12 +756,6 @@ egress = "direct"
 
 [egress.direct]
 type = "direct"
-
-[rules.app]
-direct = []
-
-[rules.domain]
-direct = []
 "#;
 
         write_file(&path, next_raw);
