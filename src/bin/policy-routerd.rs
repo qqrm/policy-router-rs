@@ -448,7 +448,9 @@ const fn map_matcher_kind(match_kind: engine::MatchKind) -> MatcherKind {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashSet, fs};
+
+    use notify::EventKind;
 
     use super::*;
 
@@ -463,6 +465,23 @@ mod tests {
             .map_or(0, |d| d.as_nanos());
 
         std::env::temp_dir().join(format!("policy-router-{tag}-{pid}-{nanos}.toml"))
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+
+        std::env::temp_dir().join(format!("policy-router-{tag}-{pid}-{nanos}"))
+    }
+
+    fn mk_event(kind: notify::EventKind, paths: Vec<PathBuf>) -> notify::Event {
+        notify::Event {
+            kind,
+            paths,
+            attrs: notify::event::EventAttributes::default(),
+        }
     }
 
     fn load_example_config() -> AppConfig {
@@ -575,5 +594,92 @@ direct = []
         assert!(err.to_string().contains(&path.display().to_string()));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reload_event_triggers_on_config_path() {
+        let dir = tmp_dir("reload-event-config");
+        let config_path = dir.join("config.toml");
+        let watched_includes = HashSet::new();
+
+        let event = mk_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            vec![config_path.clone()],
+        );
+
+        assert!(should_reload_event(&event, &config_path, &watched_includes));
+    }
+
+    #[test]
+    fn reload_event_triggers_on_include_canonicalization() {
+        let dir = tmp_dir("reload-event-include");
+        let include_real = dir.join("lists").join("vpn.txt");
+        fs::create_dir_all(include_real.parent().expect("include parent"))
+            .expect("create include dir");
+        fs::write(&include_real, "data").expect("write include file");
+
+        let watched_key = fs::canonicalize(&include_real).expect("canonicalize include file");
+        let mut watched_includes = HashSet::new();
+        watched_includes.insert(watched_key);
+
+        let noncanonical = dir.join("lists").join("..").join("lists").join("vpn.txt");
+        let event = mk_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            vec![noncanonical],
+        );
+
+        assert!(should_reload_event(
+            &event,
+            &dir.join("config.toml"),
+            &watched_includes
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_event_ignores_unrelated_path() {
+        let dir = tmp_dir("reload-event-unrelated");
+        let config_path = dir.join("config.toml");
+        let include_real = dir.join("lists").join("vpn.txt");
+        fs::create_dir_all(include_real.parent().expect("include parent"))
+            .expect("create include dir");
+        fs::write(&include_real, "data").expect("write include file");
+
+        let watched_key = fs::canonicalize(&include_real).expect("canonicalize include file");
+        let mut watched_includes = HashSet::new();
+        watched_includes.insert(watched_key);
+
+        let other = dir.join("other.txt");
+        let event = mk_event(
+            EventKind::Modify(notify::event::ModifyKind::Any),
+            vec![other],
+        );
+
+        assert!(!should_reload_event(
+            &event,
+            &config_path,
+            &watched_includes
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_event_ignores_irrelevant_kind() {
+        let dir = tmp_dir("reload-event-kind");
+        let config_path = dir.join("config.toml");
+        let watched_includes = HashSet::new();
+
+        let event = mk_event(
+            EventKind::Access(notify::event::AccessKind::Any),
+            vec![config_path.clone()],
+        );
+
+        assert!(!should_reload_event(
+            &event,
+            &config_path,
+            &watched_includes
+        ));
     }
 }
