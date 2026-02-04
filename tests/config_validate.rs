@@ -126,3 +126,72 @@ main = ["   "]
     let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
+
+#[test]
+fn validate_rejects_enabled_process_with_empty_program() {
+    let raw = base_config(
+        r#"[egress.main]
+type = "direct"
+
+[egress.main.process]
+enabled = true
+program = "   "
+"#,
+        r"[rules.app]
+main = []
+
+[rules.domain]
+main = []
+",
+    );
+    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_enabled_process_with_bad_backoff() {
+    let raw = base_config(
+        r#"[egress.main]
+type = "direct"
+
+[egress.main.process]
+enabled = true
+program = "worker"
+backoff_ms = 0
+max_backoff_ms = 10
+max_restarts_per_minute = 1
+"#,
+        r"[rules.app]
+main = []
+
+[rules.domain]
+main = []
+",
+    );
+    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_enabled_process_with_zero_restart_limit() {
+    let raw = base_config(
+        r#"[egress.main]
+type = "direct"
+
+[egress.main.process]
+enabled = true
+program = "worker"
+backoff_ms = 10
+max_backoff_ms = 10
+max_restarts_per_minute = 0
+"#,
+        r"[rules.app]
+main = []
+
+[rules.domain]
+main = []
+",
+    );
+    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    assert!(cfg.validate().is_err());
+}

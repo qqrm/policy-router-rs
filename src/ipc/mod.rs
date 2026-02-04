@@ -103,6 +103,19 @@ pub struct DiagnosticsResponse {
     pub ipc_requests: u64,
     pub reload_ok: u64,
     pub reload_err: u64,
+    #[serde(default)]
+    pub processes: Vec<ProcessStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessStatus {
+    pub egress_id: String,
+    pub enabled: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub restarts: u64,
+    pub last_exit_code: Option<i32>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

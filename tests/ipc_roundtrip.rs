@@ -142,6 +142,7 @@ fn spawn_stateful_server(
                     ipc_requests: 1,
                     reload_ok: 0,
                     reload_err: 0,
+                    processes: Vec::new(),
                 }),
             };
 

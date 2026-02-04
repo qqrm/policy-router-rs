@@ -5,6 +5,17 @@ egress = "direct"
 type = "singbox"
 endpoint = "socks5://127.0.0.1:1488"
 
+[egress.vpn.process]
+enabled = false
+program = "sing-box"
+args = ["run", "-c", "singbox.json"]
+cwd = "."
+env = {}
+restart = "on-failure"
+backoff_ms = 500
+max_backoff_ms = 10_000
+max_restarts_per_minute = 30
+
 [egress.proxy]
 type = "socks5"
 endpoint = "socks5://127.0.0.1:1080"

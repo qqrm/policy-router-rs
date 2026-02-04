@@ -378,18 +378,14 @@ mod slow {
         process_name: Option<&str>,
         domain: Option<&str>,
     ) -> Option<Decision> {
-        if let Some(name) = process_name
-            && let Some((egress, pattern)) = choose_block_app(cfg, name)
-        {
+        if let Some((egress, pattern)) = process_name.and_then(|name| choose_block_app(cfg, name)) {
             return Some(Decision {
                 egress: egress.clone(),
                 reason: DecisionReason::BlockByApp { egress, pattern },
             });
         }
 
-        if let Some(d) = domain
-            && let Some((egress, m)) = choose_block_domain(cfg, d)
-        {
+        if let Some((egress, m)) = domain.and_then(|d| choose_block_domain(cfg, d)) {
             return Some(Decision {
                 egress: egress.clone(),
                 reason: DecisionReason::BlockByDomain {

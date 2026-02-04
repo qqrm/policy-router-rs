@@ -3,7 +3,7 @@ use std::{
     io::{self, BufReader},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -21,9 +21,11 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use policy_router_rs::{
     ipc::{
         DecisionInfo, DecisionSource, DiagnosticsResponse, ErrorResponse, MatcherInfo, MatcherKind,
-        Request, Response, SOCKET_ENV_VAR, StatusResponse, read_json_line, write_json_line,
+        ProcessStatus, Request, Response, SOCKET_ENV_VAR, StatusResponse, read_json_line,
+        write_json_line,
     },
     policy::{config::AppConfig, engine},
+    supervisor::{DesiredProcess, Supervisor, SupervisorCmd},
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -53,6 +55,9 @@ struct State {
     reload_ok: std::sync::atomic::AtomicU64,
     reload_err: std::sync::atomic::AtomicU64,
     last_reload_epoch_ms: std::sync::atomic::AtomicU64,
+    supervisor_tx: Mutex<Option<mpsc::Sender<SupervisorCmd>>>,
+    supervisor_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    supervisor_status: Arc<Mutex<Vec<ProcessStatus>>>,
 }
 
 #[derive(Debug)]
@@ -88,6 +93,14 @@ fn main() -> Result<()> {
     };
 
     let socket_label = resolve_socket_label(cli.socket.as_deref());
+    let supervisor_status = Arc::new(Mutex::new(Vec::new()));
+    let (supervisor_tx, supervisor_handle) = if has_any_process_spec(&runtime.cfg) {
+        let (tx, rx) = mpsc::channel::<SupervisorCmd>();
+        let handle = spawn_supervisor(rx, Arc::clone(&supervisor_status));
+        (Some(tx), Some(handle))
+    } else {
+        (None, None)
+    };
 
     let initial_last_reload = now_epoch_ms();
 
@@ -102,6 +115,9 @@ fn main() -> Result<()> {
         reload_ok: std::sync::atomic::AtomicU64::new(0),
         reload_err: std::sync::atomic::AtomicU64::new(0),
         last_reload_epoch_ms: std::sync::atomic::AtomicU64::new(initial_last_reload),
+        supervisor_tx: Mutex::new(supervisor_tx),
+        supervisor_handle: Mutex::new(supervisor_handle),
+        supervisor_status,
     });
 
     ctrlc::set_handler({
@@ -122,6 +138,9 @@ fn main() -> Result<()> {
         .context("failed to create IPC listener")?;
 
     let watcher_handle = spawn_config_watcher(Arc::clone(&state));
+
+    let runtime = state.runtime.load();
+    apply_desired_if_running(&state, &runtime.cfg);
 
     info!("started");
 
@@ -147,6 +166,8 @@ fn main() -> Result<()> {
 
     info!("stopping");
 
+    stop_supervisor_if_running(&state);
+
     cleanup_fs_socket(fs_socket_path.as_ref());
 
     if let Err(err) = watcher_handle.join() {
@@ -154,6 +175,109 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn spawn_supervisor(
+    rx: mpsc::Receiver<SupervisorCmd>,
+    status: Arc<Mutex<Vec<ProcessStatus>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut supervisor = Supervisor::new(status);
+        let tick = Duration::from_millis(200);
+        loop {
+            match rx.recv_timeout(tick) {
+                Ok(SupervisorCmd::ApplyDesired(desired)) => {
+                    supervisor.reconcile(desired);
+                }
+                Ok(SupervisorCmd::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    supervisor.stop_all();
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    supervisor.tick();
+                }
+            }
+        }
+    })
+}
+
+fn has_any_process_spec(cfg: &AppConfig) -> bool {
+    cfg.egress.values().any(|spec| spec.process.is_some())
+}
+
+fn apply_desired_if_running(state: &State, cfg: &AppConfig) {
+    let maybe_tx = state
+        .supervisor_tx
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    if let Some(tx) = maybe_tx {
+        let desired = build_desired_processes(cfg);
+        let _ = tx.send(SupervisorCmd::ApplyDesired(desired));
+    }
+}
+
+fn start_supervisor_if_needed(state: &State, cfg: &AppConfig) -> bool {
+    if !has_any_process_spec(cfg) {
+        return false;
+    }
+    let Ok(mut tx_guard) = state.supervisor_tx.lock() else {
+        return false;
+    };
+    if tx_guard.is_some() {
+        return false;
+    }
+    let (tx, rx) = mpsc::channel::<SupervisorCmd>();
+    let handle = spawn_supervisor(rx, Arc::clone(&state.supervisor_status));
+    *tx_guard = Some(tx.clone());
+    drop(tx_guard);
+    if let Ok(mut handle_guard) = state.supervisor_handle.lock() {
+        *handle_guard = Some(handle);
+    }
+    let desired = build_desired_processes(cfg);
+    let _ = tx.send(SupervisorCmd::ApplyDesired(desired));
+    true
+}
+
+fn stop_supervisor_if_running(state: &State) {
+    let tx = {
+        let Ok(mut guard) = state.supervisor_tx.lock() else {
+            return;
+        };
+        guard.take()
+    };
+    let handle = {
+        let Ok(mut guard) = state.supervisor_handle.lock() else {
+            return;
+        };
+        guard.take()
+    };
+
+    if let Some(tx) = tx {
+        let _ = tx.send(SupervisorCmd::Stop);
+    }
+    if let Some(handle) = handle {
+        match handle.join() {
+            Ok(()) => {}
+            Err(err) => {
+                warn!(error = ?err, "supervisor thread join failed");
+            }
+        }
+    }
+    if let Ok(mut guard) = state.supervisor_status.lock() {
+        guard.clear();
+    }
+}
+
+fn reconcile_supervisor(state: &State, cfg: &AppConfig) {
+    if has_any_process_spec(cfg) {
+        let started = start_supervisor_if_needed(state, cfg);
+        if !started {
+            apply_desired_if_running(state, cfg);
+        }
+    } else {
+        stop_supervisor_if_running(state);
+    }
 }
 
 fn resolve_ipc_socket(
@@ -245,9 +369,10 @@ fn run_config_watcher(state: &Arc<State>) -> Result<()> {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        if let Some(since) = last_event
-            && since.elapsed() >= debounce
-        {
+        let should_reload = last_event
+            .as_ref()
+            .is_some_and(|since| since.elapsed() >= debounce);
+        if should_reload {
             last_event = None;
             match reload_config(state) {
                 Ok(()) => info!("reloaded config (auto)"),
@@ -365,6 +490,11 @@ fn build_diagnostics(state: &State) -> DiagnosticsResponse {
         ipc_requests: state.ipc_requests.load(std::sync::atomic::Ordering::SeqCst),
         reload_ok: state.reload_ok.load(std::sync::atomic::Ordering::SeqCst),
         reload_err: state.reload_err.load(std::sync::atomic::Ordering::SeqCst),
+        processes: state
+            .supervisor_status
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -389,6 +519,8 @@ fn reload_config(state: &State) -> Result<()> {
         .last_reload_epoch_ms
         .store(now_epoch_ms(), Ordering::Relaxed);
     state.reload_ok.fetch_add(1, Ordering::Relaxed);
+    let runtime = state.runtime.load();
+    reconcile_supervisor(state, &runtime.cfg);
     Ok(())
 }
 
@@ -473,6 +605,18 @@ const fn map_matcher_kind(match_kind: engine::MatchKind) -> MatcherKind {
     }
 }
 
+fn build_desired_processes(cfg: &AppConfig) -> Vec<DesiredProcess> {
+    cfg.egress
+        .iter()
+        .filter_map(|(id, spec)| {
+            spec.process.as_ref().map(|process| DesiredProcess {
+                egress_id: id.clone(),
+                spec: process.clone(),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, fs};
@@ -535,6 +679,9 @@ mod tests {
             reload_ok: std::sync::atomic::AtomicU64::new(0),
             reload_err: std::sync::atomic::AtomicU64::new(0),
             last_reload_epoch_ms: std::sync::atomic::AtomicU64::new(0),
+            supervisor_tx: Mutex::new(None),
+            supervisor_handle: Mutex::new(None),
+            supervisor_status: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
