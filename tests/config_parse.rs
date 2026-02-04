@@ -3,14 +3,14 @@ use policy_router_rs::policy::config::AppConfig;
 #[test]
 fn config_example_parses() {
     let raw = include_str!("../config/config.example.toml");
-    let cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
+    let mut cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
     cfg.validate().expect("config.example.toml must validate");
 }
 
 #[test]
 fn config_example_validate_ok() {
     let raw = include_str!("../config/config.example.toml");
-    let cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
+    let mut cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
     cfg.validate().expect("config.example.toml must validate");
 }
 
@@ -33,7 +33,7 @@ backoff_ms = 500
 max_backoff_ms = 10_000
 max_restarts_per_minute = 5
 "#;
-    let cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
     cfg.validate().expect("config must validate");
     let process = cfg
         .egress
@@ -58,7 +58,7 @@ type = "direct"
 [egress.direct.process]
 enabled = false
 "#;
-    let cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
+    let mut cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
     cfg.validate().expect("config must validate");
     let process = cfg
         .egress

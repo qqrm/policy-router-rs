@@ -86,6 +86,8 @@ fn expand_rule_list(rules: &mut Vec<Rule>, base_dir: &Path, deps: &mut Vec<PathB
             deps,
         )
         .with_context(|| format!("failed to expand rules[{index}].domain includes"))?;
+        let cidr_values = expand_rule_field(rule.dst_ip_cidr.as_deref(), base_dir, deps)
+            .with_context(|| format!("failed to expand rules[{index}].dst_ip_cidr includes"))?;
 
         if app_values.is_empty() && rule.app.is_some() {
             bail!("rules[{index}].app include expanded to no patterns");
@@ -93,10 +95,19 @@ fn expand_rule_list(rules: &mut Vec<Rule>, base_dir: &Path, deps: &mut Vec<PathB
         if domain_values.is_empty() && rule.domain.is_some() {
             bail!("rules[{index}].domain include expanded to no patterns");
         }
+        if cidr_values.is_empty() && rule.dst_ip_cidr.is_some() {
+            bail!("rules[{index}].dst_ip_cidr include expanded to no patterns");
+        }
 
         if app_values.len() > 1 && domain_values.len() > 1 {
             bail!(
                 "rules[{index}] contains includes for both app and domain; \
+expand one field per rule to avoid cartesian expansion"
+            );
+        }
+        if cidr_values.len() > 1 && (app_values.len() > 1 || domain_values.len() > 1) {
+            bail!(
+                "rules[{index}] contains includes for dst_ip_cidr and app/domain; \
 expand one field per rule to avoid cartesian expansion"
             );
         }
@@ -117,16 +128,24 @@ expand one field per rule to avoid cartesian expansion"
                 .map(|value| Some(DomainPattern(value)))
                 .collect()
         };
+        let cidr_values = if cidr_values.is_empty() {
+            vec![None]
+        } else {
+            cidr_values.into_iter().map(Some).collect()
+        };
 
         for app_value in &app_values {
             for domain_value in &domain_values {
-                expanded.push(Rule {
-                    egress: rule.egress.clone(),
-                    app: app_value.clone(),
-                    domain: domain_value.clone(),
-                    dst_ip_cidr: rule.dst_ip_cidr,
-                    name: rule.name.clone(),
-                });
+                for cidr_value in &cidr_values {
+                    expanded.push(Rule {
+                        egress: rule.egress.clone(),
+                        app: app_value.clone(),
+                        domain: domain_value.clone(),
+                        dst_ip_cidr: cidr_value.clone(),
+                        dst_ip_cidr_parsed: None,
+                        name: rule.name.clone(),
+                    });
+                }
             }
         }
     }
@@ -253,7 +272,7 @@ impl AppConfig {
     /// # Errors
     ///
     /// Returns an error if defaults or rules reference unknown egress ids.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&mut self) -> Result<()> {
         if !self.egress.contains_key(&self.defaults.egress) {
             bail!(
                 "defaults.egress '{}' is not declared under [egress.*]",
@@ -335,13 +354,13 @@ impl AppConfig {
 }
 
 impl AppConfig {
-    fn validate_rules(&self) -> Result<()> {
+    fn validate_rules(&mut self) -> Result<()> {
         let mut app_domain_rules = Vec::new();
         let mut domain_rules = Vec::new();
         let mut dst_ip_rules = Vec::new();
         let mut app_rules = Vec::new();
 
-        for (index, rule) in self.rules.iter().enumerate() {
+        for (index, rule) in self.rules.iter_mut().enumerate() {
             let position = index + 1;
 
             if let Some(app) = rule.app.as_ref()
@@ -374,6 +393,19 @@ use dst_ip_cidr alone or split into separate rules"
                 .domain
                 .as_ref()
                 .and_then(|domain| normalize_domain_pattern(domain.as_str()));
+            let cidr_parsed = if let Some(raw) = rule.dst_ip_cidr.as_ref() {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    bail!("rules[{index}].dst_ip_cidr is empty");
+                }
+                let cidr = trimmed.parse::<IpNet>().map_err(|_| {
+                    anyhow!("rules[{index}].dst_ip_cidr '{trimmed}' is not a valid CIDR")
+                })?;
+                Some(cidr)
+            } else {
+                None
+            };
+            rule.dst_ip_cidr_parsed = cidr_parsed;
 
             if rule.domain.is_some() && domain_suffix.is_none() {
                 bail!("rules[{index}].domain is empty after normalization");
@@ -461,7 +493,10 @@ pub struct Rule {
     #[serde(default)]
     pub domain: Option<DomainPattern>,
     #[serde(default)]
-    pub dst_ip_cidr: Option<IpNet>,
+    pub dst_ip_cidr: Option<String>,
+    #[serde(skip)]
+    #[serde(default)]
+    pub dst_ip_cidr_parsed: Option<IpNet>,
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -657,11 +692,11 @@ fn detect_conflicts_app(rules: &[RuleInfo<'_>]) -> Result<()> {
 
 fn detect_conflicts_dst_ip(rules: &[RuleInfo<'_>]) -> Result<()> {
     for (i, left) in rules.iter().enumerate() {
-        let Some(left_net) = left.rule.dst_ip_cidr.as_ref() else {
+        let Some(left_net) = left.rule.dst_ip_cidr_parsed.as_ref() else {
             continue;
         };
         for right in rules.iter().skip(i + 1) {
-            let Some(right_net) = right.rule.dst_ip_cidr.as_ref() else {
+            let Some(right_net) = right.rule.dst_ip_cidr_parsed.as_ref() else {
                 continue;
             };
             if cidr_overlaps(left_net, right_net) {
@@ -717,7 +752,7 @@ fn format_rule(rule: &Rule) -> String {
         parts.push(format!("domain='{}'", domain.as_str().trim()));
     }
     if let Some(cidr) = &rule.dst_ip_cidr {
-        parts.push(format!("dst_ip_cidr='{cidr}'"));
+        parts.push(format!("dst_ip_cidr='{}'", cidr.trim()));
     }
     format!("{{ {} }}", parts.join(", "))
 }
