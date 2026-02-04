@@ -125,6 +125,8 @@ fn spawn_stateful_server(
                             reason: format!("process={proc} domain={dom}"),
                             source: DecisionSource::Default,
                             rule_egress: Some("vpn".to_owned()),
+                            rule_index: None,
+                            rule_name: None,
                             matcher: Some(MatcherInfo {
                                 kind: MatcherKind::Exact,
                                 pattern: "example".to_owned(),

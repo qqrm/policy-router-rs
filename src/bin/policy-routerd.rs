@@ -559,6 +559,14 @@ fn explain(
     let source = map_source(&decision.reason);
     let rule_egress = Some(map_rule_egress(&decision.reason));
     let matcher = map_matcher(&decision.reason);
+    let (rule_index, rule_name) = match &decision.reason {
+        engine::DecisionReason::RuleMatch {
+            rule_index,
+            rule_name,
+            ..
+        } => (Some(*rule_index), rule_name.clone()),
+        engine::DecisionReason::Default { .. } => (None, None),
+    };
 
     policy_router_rs::ipc::ExplainResponse {
         decision: DecisionInfo {
@@ -566,6 +574,8 @@ fn explain(
             reason: decision.reason.to_human(),
             source,
             rule_egress,
+            rule_index,
+            rule_name,
             matcher,
         },
     }

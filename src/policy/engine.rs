@@ -33,6 +33,7 @@ pub enum DecisionReason {
     RuleMatch {
         tier: RuleTier,
         rule_index: usize,
+        rule_name: Option<String>,
         egress: EgressId,
         app: Option<String>,
         domain: Option<DomainMatch>,
@@ -50,6 +51,7 @@ impl DecisionReason {
             Self::RuleMatch {
                 tier,
                 rule_index,
+                rule_name,
                 egress,
                 app,
                 domain,
@@ -71,9 +73,13 @@ impl DecisionReason {
                 } else {
                     parts.join(", ")
                 };
+                let name = rule_name
+                    .as_ref()
+                    .map(|name| format!(", name '{name}'"))
+                    .unwrap_or_default();
                 format!(
-                    "rule #{rule_index} (tier {}): {detail} -> egress '{egress}'",
-                    tier.as_str()
+                    "rule #{rule_index} (tier {}{name}): {detail} -> egress '{egress}'",
+                    tier.as_str(),
                 )
             }
             Self::Default { egress } => {
@@ -107,6 +113,7 @@ struct CompiledRule {
     index: usize,
     tier: RuleTier,
     egress: EgressId,
+    name: Option<String>,
     app_normalized: Option<String>,
     app_raw: Option<String>,
     domain: Option<CompiledDomainPattern>,
@@ -253,6 +260,7 @@ fn compile_rule(rule: &Rule, index: usize) -> Option<CompiledRule> {
         index,
         tier,
         egress: rule.egress.clone(),
+        name: rule.name.clone(),
         app_normalized,
         app_raw,
         domain,
@@ -305,6 +313,7 @@ fn match_rules(
             reason: DecisionReason::RuleMatch {
                 tier: rule.tier,
                 rule_index: rule.index,
+                rule_name: rule.name.clone(),
                 egress: rule.egress.clone(),
                 app: rule.app_raw.clone(),
                 domain: domain_match,

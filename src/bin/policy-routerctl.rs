@@ -136,6 +136,12 @@ fn print_text(resp: &Response, quiet: bool) -> Result<()> {
             if let Some(rule_egress) = &x.decision.rule_egress {
                 println!("rule_egress: {rule_egress}");
             }
+            if let Some(rule_index) = x.decision.rule_index {
+                println!("rule_index: {rule_index}");
+            }
+            if let Some(rule_name) = &x.decision.rule_name {
+                println!("rule_name: {rule_name}");
+            }
             if let Some(m) = &x.decision.matcher {
                 println!("matcher:");
                 println!("  type: {}", fmt_snake_case(&m.kind)?);
