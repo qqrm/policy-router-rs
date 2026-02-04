@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fmt, fs, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -24,11 +28,14 @@ impl AppConfig {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config: {}", path.display()))?;
 
-        let cfg: Self = toml::from_str(&raw)
+        let mut cfg: Self = toml::from_str(&raw)
             .with_context(|| format!("failed to parse TOML config: {}", path.display()))?;
 
-        cfg.validate()?;
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        cfg.expand_includes(base_dir)
+            .with_context(|| format!("failed to expand includes for config: {}", path.display()))?;
 
+        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -109,6 +116,144 @@ impl AppConfig {
 
         Ok(())
     }
+}
+
+const INCLUDE_PREFIX: &str = "@file:";
+const MAX_INCLUDE_DEPTH: usize = 16;
+
+impl AppConfig {
+    fn expand_includes(&mut self, base_dir: &Path) -> Result<()> {
+        expand_rule_map_app(&mut self.rules.app, base_dir)?;
+        expand_rule_map_domain(&mut self.rules.domain, base_dir)?;
+        Ok(())
+    }
+}
+
+fn expand_rule_map_app(
+    map: &mut BTreeMap<EgressId, Vec<AppPattern>>,
+    base_dir: &Path,
+) -> Result<()> {
+    for patterns in map.values_mut() {
+        let mut out: Vec<String> = Vec::new();
+        let mut stack: HashSet<PathBuf> = HashSet::new();
+
+        for p in patterns.iter() {
+            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, &mut out)?;
+        }
+
+        *patterns = out.into_iter().map(AppPattern).collect();
+    }
+    Ok(())
+}
+
+fn expand_rule_map_domain(
+    map: &mut BTreeMap<EgressId, Vec<DomainPattern>>,
+    base_dir: &Path,
+) -> Result<()> {
+    for patterns in map.values_mut() {
+        let mut out: Vec<String> = Vec::new();
+        let mut stack: HashSet<PathBuf> = HashSet::new();
+
+        for p in patterns.iter() {
+            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, &mut out)?;
+        }
+
+        *patterns = out.into_iter().map(DomainPattern).collect();
+    }
+    Ok(())
+}
+
+fn expand_pattern_entry(
+    raw: &str,
+    base_dir: &Path,
+    stack: &mut HashSet<PathBuf>,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    if depth >= MAX_INCLUDE_DEPTH {
+        bail!("include depth exceeded (max depth {MAX_INCLUDE_DEPTH})");
+    }
+
+    let trimmed = raw.trim();
+    if let Some(include_path) = trimmed.strip_prefix(INCLUDE_PREFIX).map(str::trim) {
+        if include_path.is_empty() {
+            bail!("include marker '{INCLUDE_PREFIX}' must be followed by a path");
+        }
+
+        let resolved = resolve_include_path(base_dir, include_path);
+        let key = fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+
+        if !stack.insert(key.clone()) {
+            bail!("include cycle detected at {}", key.display());
+        }
+
+        let lines = read_patterns_file(&resolved).with_context(|| {
+            format!(
+                "failed to read include file {} (from base {})",
+                resolved.display(),
+                base_dir.display()
+            )
+        })?;
+
+        let next_base = resolved.parent().unwrap_or(base_dir);
+
+        for line in lines {
+            expand_pattern_entry(&line, next_base, stack, depth + 1, out)?;
+        }
+
+        stack.remove(&key);
+    } else {
+        // Normal inline pattern (keep exactly as user wrote it, but trimmed)
+        let value = trimmed.to_string();
+        if !value.is_empty() {
+            out.push(value);
+        }
+    }
+    Ok(())
+}
+
+fn resolve_include_path(base_dir: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base_dir.join(p)
+    }
+}
+
+fn read_patterns_file(path: &Path) -> Result<Vec<String>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+
+    for line in raw.lines() {
+        let mut s = line.trim();
+
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with('#') || s.starts_with(';') || s.starts_with("//") {
+            continue;
+        }
+
+        // Strip inline comments (# or ;)
+        if let Some(idx) = s.find('#') {
+            s = s[..idx].trim();
+        }
+        if let Some(idx) = s.find(';') {
+            s = s[..idx].trim();
+        }
+
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with('#') || s.starts_with(';') || s.starts_with("//") {
+            continue;
+        }
+
+        out.push(s.to_string());
+    }
+
+    Ok(out)
 }
 
 fn parse_endpoint(endpoint: &str) -> Result<(String, String, u16)> {

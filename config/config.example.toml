@@ -15,6 +15,12 @@ type = "direct"
 [egress.block]
 type = "block"
 
+# You can include external rule lists using "@file:<path>" inside the arrays.
+# Paths are resolved relative to this config file. Include files are line-based:
+# - empty lines and lines starting with #, ;, or // are ignored
+# - inline comments after # or ; are stripped
+# Example:
+# vpn = ["@file:lists/vpn_apps.txt"]
 [rules.app]
 vpn = ["zen.exe", "Telegram.exe", "Element.exe"]
 proxy = []
