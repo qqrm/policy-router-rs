@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::{self, BufReader},
     path::{Path, PathBuf},
     sync::{
@@ -46,6 +47,7 @@ struct State {
     config_path: PathBuf,
     socket: String,
     runtime: ArcSwap<RuntimeConfig>,
+    include_deps: ArcSwap<Vec<PathBuf>>,
     running: AtomicBool,
     ipc_requests: std::sync::atomic::AtomicU64,
     reload_ok: std::sync::atomic::AtomicU64,
@@ -70,7 +72,7 @@ fn main() -> Result<()> {
         .with_level(true)
         .init();
 
-    let cfg = AppConfig::load_from_path(&cli.config)?;
+    let (cfg, deps) = AppConfig::load_from_path_with_deps(&cli.config)?;
     let runtime = RuntimeConfig {
         engine: engine::CompiledEngine::compile(&cfg),
         cfg,
@@ -83,6 +85,7 @@ fn main() -> Result<()> {
         config_path: cli.config,
         socket: socket_label,
         runtime: ArcSwap::from_pointee(runtime),
+        include_deps: ArcSwap::from_pointee(deps),
         running: AtomicBool::new(true),
         ipc_requests: std::sync::atomic::AtomicU64::new(0),
         reload_ok: std::sync::atomic::AtomicU64::new(0),
@@ -186,19 +189,40 @@ fn run_config_watcher(state: &Arc<State>) -> Result<()> {
     })
     .context("failed to create config watcher")?;
 
-    let config_dir = state.config_path.parent().unwrap_or_else(|| Path::new("."));
-
     watcher
-        .watch(config_dir, RecursiveMode::NonRecursive)
-        .with_context(|| format!("failed to watch config directory {}", config_dir.display()))?;
+        .watch(&state.config_path, RecursiveMode::NonRecursive)
+        .with_context(|| format!("failed to watch config {}", state.config_path.display()))?;
+
+    let mut watched_includes: HashSet<PathBuf> = HashSet::new();
+    {
+        let deps = state.include_deps.load();
+        for p in deps.iter() {
+            let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+            watched_includes.insert(p.clone());
+        }
+    }
 
     let debounce = Duration::from_millis(350);
     let mut last_event: Option<Instant> = None;
 
     while state.running.load(Ordering::SeqCst) {
+        {
+            let deps = state.include_deps.load();
+            let next: HashSet<PathBuf> = deps.iter().cloned().collect();
+            if next != watched_includes {
+                for old in watched_includes.difference(&next) {
+                    let _ = watcher.unwatch(old);
+                }
+                for add in next.difference(&watched_includes) {
+                    let _ = watcher.watch(add, RecursiveMode::NonRecursive);
+                }
+                watched_includes = next;
+            }
+        }
+
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Ok(event)) => {
-                if should_reload_event(&event, &state.config_path) {
+                if should_reload_event(&event, &state.config_path, &watched_includes) {
                     last_event = Some(Instant::now());
                 }
             }
@@ -225,11 +249,25 @@ fn run_config_watcher(state: &Arc<State>) -> Result<()> {
     Ok(())
 }
 
-fn should_reload_event(event: &Event, config_path: &Path) -> bool {
-    matches!(
+fn should_reload_event(
+    event: &Event,
+    config_path: &Path,
+    watched_includes: &HashSet<PathBuf>,
+) -> bool {
+    if !matches!(
         &event.kind,
         EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) | EventKind::Any
-    ) && event.paths.iter().any(|path| path == config_path)
+    ) {
+        return false;
+    }
+
+    event.paths.iter().any(|path| {
+        if path == config_path {
+            return true;
+        }
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        watched_includes.contains(&key)
+    })
 }
 
 fn handle_conn(state: &Arc<State>, mut conn: interprocess::local_socket::Stream) -> Result<()> {
@@ -307,7 +345,7 @@ fn build_diagnostics(state: &State) -> DiagnosticsResponse {
 }
 
 fn reload_config(state: &State) -> Result<()> {
-    let next = match AppConfig::load_from_path(&state.config_path)
+    let (next, deps) = match AppConfig::load_from_path_with_deps(&state.config_path)
         .with_context(|| format!("failed to load config {}", state.config_path.display()))
     {
         Ok(cfg) => cfg,
@@ -322,6 +360,7 @@ fn reload_config(state: &State) -> Result<()> {
         cfg: next,
     };
     state.runtime.store(Arc::new(runtime));
+    state.include_deps.store(Arc::new(deps));
     state.reload_ok.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -438,11 +477,13 @@ mod tests {
             engine: engine::CompiledEngine::compile(&cfg),
             cfg,
         };
+        let deps = Vec::new();
         State {
             started_at: Instant::now(),
             config_path,
             socket: "test.sock".to_owned(),
             runtime: ArcSwap::from_pointee(runtime),
+            include_deps: ArcSwap::from_pointee(deps),
             running: AtomicBool::new(true),
             ipc_requests: std::sync::atomic::AtomicU64::new(0),
             reload_ok: std::sync::atomic::AtomicU64::new(0),
