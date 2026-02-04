@@ -85,6 +85,8 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub uptime_ms: u64,
+    #[serde(default)]
+    pub last_reload_ms: Option<u64>,
     pub config_path: String,
     pub egress: Vec<EgressInfo>,
 }
@@ -92,6 +94,8 @@ pub struct StatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsResponse {
     pub uptime_ms: u64,
+    #[serde(default)]
+    pub last_reload_ms: Option<u64>,
     pub config_path: String,
     pub socket: String,
     pub egress_count: usize,

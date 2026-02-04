@@ -90,6 +90,7 @@ fn spawn_stateful_server(
 
                     Response::OkStatus(StatusResponse {
                         uptime_ms: 123,
+                        last_reload_ms: None,
                         config_path: "config.toml".to_owned(),
                         egress: vec![
                             EgressInfo {
@@ -133,6 +134,7 @@ fn spawn_stateful_server(
                 }
                 Request::Diagnostics => Response::OkDiagnostics(DiagnosticsResponse {
                     uptime_ms: 123,
+                    last_reload_ms: None,
                     config_path: "config.toml".to_owned(),
                     socket: "test.sock".to_owned(),
                     egress_count: 2,
