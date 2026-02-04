@@ -196,15 +196,62 @@ Example outcomes:
 
 ## Roadmap
 
-Phase 2:
-- stable split tunneling enforcement implementation (WFP)
-- domain routing via DNS correlation cache
-- rule sets and includes
+This repo is intentionally split into incremental phases so each slice is reviewable and can be shipped without blocking the next one.
 
-Phase 3:
-- GUI (optional)
-- profiles, presets, metrics
+Current status (implemented and test-covered)
+- Policy engine
+  - Rule precedence: block > (domain/app) > default
+  - Deterministic matching with exact + suffix match kinds
+  - CompiledEngine fast-path verified against slow decisions by tests
+- Config
+  - TOML config parsing + strict validation (egress ids, endpoint format)
+  - Include lists via "@file:<path>" inside rule arrays
+    - Relative to the including file, nested includes supported
+    - Cycle detection + max depth limit (MAX_INCLUDE_DEPTH = 16)
+    - Include dependencies are discovered and returned (best-effort canonicalized)
+- Daemon + IPC + CLI
+  - policy-routerd IPC server (status/reload/stop/explain/diagnostics)
+  - policy-routerctl client with text + JSON output
+  - Reload applies new config atomically (ArcSwap) and keeps last-good on failure
+- Auto reload
+  - notify watcher triggers reload on config changes
+  - watcher also watches discovered include dependencies and updates the watch set on reload
 
-## License
+Queued small follow-ups (safe to bundle into the next task)
+- IPC/CLI: expose last_reload_ms in StatusResponse/DiagnosticsResponse and print it in policy-routerctl (serde default for compatibility).
+- Cargo metadata: Cargo.toml points to README.md while the repo uses README.MD (either rename file or update Cargo.toml).
 
-MIT
+What is NOT done yet (this is what blocks “project complete”)
+- No traffic interception layer yet (nothing actually routes Windows traffic).
+- No process/domain attribution pipeline for real connections yet (beyond “explain”).
+- No egress process supervision layer yet (starting/stopping sing-box, etc.).
+- No packaging/installation UX yet (service/task, default config layout, logs).
+
+MVP definition (“project complete”)
+On Windows: after installing and starting the daemon, network traffic is routed per config rules:
+- app rules and domain rules select an egress: direct / block / socks5 / singbox
+- config hot-reload works for both config.toml and include list files
+- basic observability exists (status/diagnostics + logs)
+
+Planned remaining work (estimate: ~8–12 more tasks of similar size)
+
+Phase 2 — Egress supervision (2–3 tasks)
+2.1 Implement EgressSupervisor to start/stop external egress processes (sing-box, etc.) from config.
+2.2 Restart policy (backoff, max restarts, “never” vs “always” vs “on-failure”), structured logging.
+2.3 Wire lifecycle into policy-routerd (Stop request stops children; reload updates desired set).
+
+Phase 3 — Traffic interception + routing MVP (3–5 tasks)
+3.1 Define the routing “plumbing” boundary: internal API that takes (process_path?, domain?, dest_ip?, dest_port?) and returns egress id + reason.
+3.2 Interception layer on Windows (WFP callout/WinDivert/etc.) with a minimal integration surface (no policy logic inside).
+3.3 Domain attribution path (DNS capture or SNI/HTTP Host extraction) feeding a short-lived cache mapping flows -> domain.
+3.4 Policy decision -> route action (direct/block/proxy) implemented end-to-end.
+3.5 Hardening: race-free cache eviction, startup/shutdown correctness, failure modes.
+
+Phase 4 — Productization (2–3 tasks)
+4.1 Config layout and “first run” UX (config.example, lists folder, documentation).
+4.2 Windows install story (service or scheduled task), log file location, graceful updates.
+4.3 CI packaging + release artifacts.
+
+Notes
+- Task numbering is sequential; if you roll multiple small fixes into a larger task, keep the numbers stable but mention “rolled into X.Y”.
+- Additive fields in IPC must remain backward compatible via serde defaulting.
