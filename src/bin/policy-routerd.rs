@@ -52,12 +52,21 @@ struct State {
     ipc_requests: std::sync::atomic::AtomicU64,
     reload_ok: std::sync::atomic::AtomicU64,
     reload_err: std::sync::atomic::AtomicU64,
+    last_reload_epoch_ms: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
 struct RuntimeConfig {
     cfg: AppConfig,
     engine: engine::CompiledEngine,
+}
+
+fn now_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn main() -> Result<()> {
@@ -80,6 +89,8 @@ fn main() -> Result<()> {
 
     let socket_label = resolve_socket_label(cli.socket.as_deref());
 
+    let initial_last_reload = now_epoch_ms();
+
     let state = Arc::new(State {
         started_at: Instant::now(),
         config_path: cli.config,
@@ -90,6 +101,7 @@ fn main() -> Result<()> {
         ipc_requests: std::sync::atomic::AtomicU64::new(0),
         reload_ok: std::sync::atomic::AtomicU64::new(0),
         reload_err: std::sync::atomic::AtomicU64::new(0),
+        last_reload_epoch_ms: std::sync::atomic::AtomicU64::new(initial_last_reload),
     });
 
     ctrlc::set_handler({
@@ -320,8 +332,14 @@ fn build_status(state: &State) -> StatusResponse {
         })
         .collect::<Vec<_>>();
 
+    let last_reload_ms = match state.last_reload_epoch_ms.load(Ordering::Relaxed) {
+        0 => None,
+        value => Some(value),
+    };
+
     StatusResponse {
         uptime_ms: u64::try_from(state.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        last_reload_ms,
         config_path: state.config_path.display().to_string(),
         egress,
     }
@@ -332,8 +350,14 @@ fn build_diagnostics(state: &State) -> DiagnosticsResponse {
 
     let runtime = state.runtime.load();
 
+    let last_reload_ms = match state.last_reload_epoch_ms.load(Ordering::Relaxed) {
+        0 => None,
+        value => Some(value),
+    };
+
     DiagnosticsResponse {
         uptime_ms,
+        last_reload_ms,
         config_path: state.config_path.display().to_string(),
         socket: state.socket.clone(),
         egress_count: runtime.cfg.egress.len(),
@@ -361,6 +385,9 @@ fn reload_config(state: &State) -> Result<()> {
     };
     state.runtime.store(Arc::new(runtime));
     state.include_deps.store(Arc::new(deps));
+    state
+        .last_reload_epoch_ms
+        .store(now_epoch_ms(), Ordering::Relaxed);
     state.reload_ok.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
@@ -507,6 +534,7 @@ mod tests {
             ipc_requests: std::sync::atomic::AtomicU64::new(0),
             reload_ok: std::sync::atomic::AtomicU64::new(0),
             reload_err: std::sync::atomic::AtomicU64::new(0),
+            last_reload_epoch_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 

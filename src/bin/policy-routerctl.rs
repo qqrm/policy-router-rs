@@ -96,6 +96,10 @@ fn print_text(resp: &Response, quiet: bool) -> Result<()> {
     match resp {
         Response::OkStatus(s) => {
             println!("uptime_ms: {}", s.uptime_ms);
+            match s.last_reload_ms {
+                Some(ms) => println!("last_reload_ms: {ms}"),
+                None => println!("last_reload_ms: (none)"),
+            }
             println!("config_path: {}", s.config_path);
             println!("egress:");
             for e in &s.egress {
@@ -131,6 +135,10 @@ fn print_text(resp: &Response, quiet: bool) -> Result<()> {
         }
         Response::OkDiagnostics(d) => {
             println!("uptime_ms: {}", d.uptime_ms);
+            match d.last_reload_ms {
+                Some(ms) => println!("last_reload_ms: {ms}"),
+                None => println!("last_reload_ms: (none)"),
+            }
             println!("config_path: {}", d.config_path);
             println!("socket: {}", d.socket);
             println!("egress_count: {}", d.egress_count);
