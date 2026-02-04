@@ -7,7 +7,7 @@ description = "Windows split tunneling policy router (apps + domains) for VPN co
 license = "MIT"
 repository = "https://github.com/qqrm/policy-router-rs"
 homepage = "https://github.com/qqrm/policy-router-rs"
-readme = "README.md"
+readme = "README.MD"
 keywords = ["windows", "split-tunnel", "proxy", "vpn", "routing"]
 categories = ["command-line-utilities", "network-programming"]
 
