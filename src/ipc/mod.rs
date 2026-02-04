@@ -143,6 +143,12 @@ pub struct DecisionInfo {
     pub rule_egress: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_index: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_name: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub matcher: Option<MatcherInfo>,
 }
 

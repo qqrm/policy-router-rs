@@ -284,3 +284,47 @@ domain = "example.com"
     let d = decide(&cfg, Some("zen.exe"), Some("example.com"), None);
     assert_eq!(d.egress, eid("direct"));
 }
+
+#[test]
+fn rule_name_and_index_propagate() {
+    let toml = r#"
+[defaults]
+egress = "direct"
+
+[egress.direct]
+type = "direct"
+
+[egress.proxy]
+type = "socks5"
+endpoint = "socks5://127.0.0.1:1080"
+
+[[rules]]
+egress = "direct"
+domain = "example.com"
+
+[[rules]]
+egress = "proxy"
+domain = "youtube.com"
+name = "video"
+"#;
+
+    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    cfg.validate().expect("config must validate");
+
+    let d = decide(&cfg, None, Some("youtube.com"), None);
+    assert_eq!(d.egress, eid("proxy"));
+
+    match d.reason {
+        DecisionReason::RuleMatch {
+            rule_index,
+            rule_name,
+            ..
+        } => {
+            assert_eq!(rule_index, 2);
+            assert_eq!(rule_name.as_deref(), Some("video"));
+        }
+        DecisionReason::Default { .. } => {
+            panic!("unexpected default reason")
+        }
+    }
+}
