@@ -15,7 +15,38 @@ pub struct AppConfig {
     pub rules: Rules,
 }
 
+const INCLUDE_PREFIX: &str = "@file:";
+const MAX_INCLUDE_DEPTH: usize = 16;
+
 impl AppConfig {
+    /// Loads configuration and returns a list of include file dependencies encountered
+    /// during expansion (canonicalized best-effort).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - the file cannot be read
+    /// - the file contents are not valid UTF-8
+    /// - the TOML cannot be parsed into [`AppConfig`]
+    /// - include expansion fails (including cycle or depth errors)
+    /// - validation fails
+    pub fn load_from_path_with_deps(path: &Path) -> Result<(Self, Vec<PathBuf>)> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config: {}", path.display()))?;
+
+        let mut cfg: Self = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse TOML config: {}", path.display()))?;
+
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+        let mut deps: Vec<PathBuf> = Vec::new();
+        cfg.expand_includes_collecting(base_dir, &mut deps)
+            .with_context(|| format!("failed to expand includes for config: {}", path.display()))?;
+
+        cfg.validate()?;
+        Ok((cfg, deps))
+    }
+
     /// Loads application configuration from a TOML file.
     ///
     /// # Errors
@@ -24,21 +55,160 @@ impl AppConfig {
     /// - the file cannot be read
     /// - the file contents are not valid UTF-8
     /// - the TOML cannot be parsed into [`AppConfig`]
+    /// - include expansion fails (including cycle or depth errors)
+    /// - validation fails
     pub fn load_from_path(path: &Path) -> Result<Self> {
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("failed to read config: {}", path.display()))?;
-
-        let mut cfg: Self = toml::from_str(&raw)
-            .with_context(|| format!("failed to parse TOML config: {}", path.display()))?;
-
-        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        cfg.expand_includes(base_dir)
-            .with_context(|| format!("failed to expand includes for config: {}", path.display()))?;
-
-        cfg.validate()?;
+        let (cfg, _deps) = Self::load_from_path_with_deps(path)?;
         Ok(cfg)
     }
 
+    fn expand_includes_collecting(
+        &mut self,
+        base_dir: &Path,
+        deps: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        expand_rule_map_domain(&mut self.rules.domain, base_dir, deps)?;
+        expand_rule_map_app(&mut self.rules.app, base_dir, deps)?;
+        Ok(())
+    }
+}
+
+fn expand_rule_map_app(
+    map: &mut BTreeMap<EgressId, Vec<AppPattern>>,
+    base_dir: &Path,
+    deps: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for patterns in map.values_mut() {
+        let mut out: Vec<String> = Vec::new();
+        let mut stack: HashSet<PathBuf> = HashSet::new();
+
+        for p in patterns.iter() {
+            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, deps, &mut out)?;
+        }
+
+        *patterns = out.into_iter().map(AppPattern).collect();
+    }
+    Ok(())
+}
+
+fn expand_rule_map_domain(
+    map: &mut BTreeMap<EgressId, Vec<DomainPattern>>,
+    base_dir: &Path,
+    deps: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for patterns in map.values_mut() {
+        let mut out: Vec<String> = Vec::new();
+        let mut stack: HashSet<PathBuf> = HashSet::new();
+
+        for p in patterns.iter() {
+            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, deps, &mut out)?;
+        }
+
+        *patterns = out.into_iter().map(DomainPattern).collect();
+    }
+    Ok(())
+}
+
+fn expand_pattern_entry(
+    raw: &str,
+    base_dir: &Path,
+    stack: &mut HashSet<PathBuf>,
+    depth: usize,
+    deps: &mut Vec<PathBuf>,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    if depth >= MAX_INCLUDE_DEPTH {
+        bail!("include depth exceeded (max depth {MAX_INCLUDE_DEPTH})");
+    }
+
+    let trimmed = raw.trim();
+    if let Some(include_path) = trimmed.strip_prefix(INCLUDE_PREFIX).map(str::trim) {
+        if include_path.is_empty() {
+            bail!("include marker '{INCLUDE_PREFIX}' must be followed by a path");
+        }
+
+        let resolved = resolve_include_path(base_dir, include_path);
+        let key = fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+
+        // record deps once, in first-seen order
+        if !deps.iter().any(|p| p == &key) {
+            deps.push(key.clone());
+        }
+
+        if !stack.insert(key.clone()) {
+            bail!("include cycle detected at {}", key.display());
+        }
+
+        let lines = read_patterns_file(&resolved).with_context(|| {
+            format!(
+                "failed to read include file {} (from base {})",
+                resolved.display(),
+                base_dir.display()
+            )
+        })?;
+
+        let next_base = resolved.parent().unwrap_or(base_dir);
+
+        for line in lines {
+            expand_pattern_entry(&line, next_base, stack, depth + 1, deps, out)?;
+        }
+
+        stack.remove(&key);
+    } else {
+        let value = trimmed.to_string();
+        if !value.is_empty() {
+            out.push(value);
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_include_path(base_dir: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base_dir.join(p)
+    }
+}
+
+fn read_patterns_file(path: &Path) -> Result<Vec<String>> {
+    let raw = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+
+    for line in raw.lines() {
+        let mut s = line.trim();
+
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with('#') || s.starts_with(';') || s.starts_with("//") {
+            continue;
+        }
+
+        // Strip inline comments (# or ;)
+        if let Some(idx) = s.find('#') {
+            s = s[..idx].trim();
+        }
+        if let Some(idx) = s.find(';') {
+            s = s[..idx].trim();
+        }
+
+        if s.is_empty() {
+            continue;
+        }
+        if s.starts_with('#') || s.starts_with(';') || s.starts_with("//") {
+            continue;
+        }
+
+        out.push(s.to_string());
+    }
+
+    Ok(out)
+}
+
+impl AppConfig {
     /// Validates configuration invariants.
     ///
     /// # Errors
@@ -116,144 +286,6 @@ impl AppConfig {
 
         Ok(())
     }
-}
-
-const INCLUDE_PREFIX: &str = "@file:";
-const MAX_INCLUDE_DEPTH: usize = 16;
-
-impl AppConfig {
-    fn expand_includes(&mut self, base_dir: &Path) -> Result<()> {
-        expand_rule_map_app(&mut self.rules.app, base_dir)?;
-        expand_rule_map_domain(&mut self.rules.domain, base_dir)?;
-        Ok(())
-    }
-}
-
-fn expand_rule_map_app(
-    map: &mut BTreeMap<EgressId, Vec<AppPattern>>,
-    base_dir: &Path,
-) -> Result<()> {
-    for patterns in map.values_mut() {
-        let mut out: Vec<String> = Vec::new();
-        let mut stack: HashSet<PathBuf> = HashSet::new();
-
-        for p in patterns.iter() {
-            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, &mut out)?;
-        }
-
-        *patterns = out.into_iter().map(AppPattern).collect();
-    }
-    Ok(())
-}
-
-fn expand_rule_map_domain(
-    map: &mut BTreeMap<EgressId, Vec<DomainPattern>>,
-    base_dir: &Path,
-) -> Result<()> {
-    for patterns in map.values_mut() {
-        let mut out: Vec<String> = Vec::new();
-        let mut stack: HashSet<PathBuf> = HashSet::new();
-
-        for p in patterns.iter() {
-            expand_pattern_entry(p.as_str(), base_dir, &mut stack, 0, &mut out)?;
-        }
-
-        *patterns = out.into_iter().map(DomainPattern).collect();
-    }
-    Ok(())
-}
-
-fn expand_pattern_entry(
-    raw: &str,
-    base_dir: &Path,
-    stack: &mut HashSet<PathBuf>,
-    depth: usize,
-    out: &mut Vec<String>,
-) -> Result<()> {
-    if depth >= MAX_INCLUDE_DEPTH {
-        bail!("include depth exceeded (max depth {MAX_INCLUDE_DEPTH})");
-    }
-
-    let trimmed = raw.trim();
-    if let Some(include_path) = trimmed.strip_prefix(INCLUDE_PREFIX).map(str::trim) {
-        if include_path.is_empty() {
-            bail!("include marker '{INCLUDE_PREFIX}' must be followed by a path");
-        }
-
-        let resolved = resolve_include_path(base_dir, include_path);
-        let key = fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
-
-        if !stack.insert(key.clone()) {
-            bail!("include cycle detected at {}", key.display());
-        }
-
-        let lines = read_patterns_file(&resolved).with_context(|| {
-            format!(
-                "failed to read include file {} (from base {})",
-                resolved.display(),
-                base_dir.display()
-            )
-        })?;
-
-        let next_base = resolved.parent().unwrap_or(base_dir);
-
-        for line in lines {
-            expand_pattern_entry(&line, next_base, stack, depth + 1, out)?;
-        }
-
-        stack.remove(&key);
-    } else {
-        // Normal inline pattern (keep exactly as user wrote it, but trimmed)
-        let value = trimmed.to_string();
-        if !value.is_empty() {
-            out.push(value);
-        }
-    }
-    Ok(())
-}
-
-fn resolve_include_path(base_dir: &Path, raw: &str) -> PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        base_dir.join(p)
-    }
-}
-
-fn read_patterns_file(path: &Path) -> Result<Vec<String>> {
-    let raw = fs::read_to_string(path)?;
-    let mut out = Vec::new();
-
-    for line in raw.lines() {
-        let mut s = line.trim();
-
-        if s.is_empty() {
-            continue;
-        }
-        if s.starts_with('#') || s.starts_with(';') || s.starts_with("//") {
-            continue;
-        }
-
-        // Strip inline comments (# or ;)
-        if let Some(idx) = s.find('#') {
-            s = s[..idx].trim();
-        }
-        if let Some(idx) = s.find(';') {
-            s = s[..idx].trim();
-        }
-
-        if s.is_empty() {
-            continue;
-        }
-        if s.starts_with('#') || s.starts_with(';') || s.starts_with("//") {
-            continue;
-        }
-
-        out.push(s.to_string());
-    }
-
-    Ok(out)
 }
 
 fn parse_endpoint(endpoint: &str) -> Result<(String, String, u16)> {

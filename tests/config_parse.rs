@@ -92,7 +92,14 @@ direct = []
     )
     .expect("write config.toml");
 
-    let cfg = AppConfig::load_from_path(&cfg_path).expect("load config with includes");
+    let (cfg, deps) =
+        AppConfig::load_from_path_with_deps(&cfg_path).expect("load config with includes");
+
+    let dep_names: Vec<String> = deps
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(dep_names, vec!["a.txt", "b.txt", "apps.txt"]);
 
     let vpn_domains = cfg
         .rules
