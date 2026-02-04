@@ -146,6 +146,24 @@ fn print_text(resp: &Response, quiet: bool) -> Result<()> {
             println!("ipc_requests: {}", d.ipc_requests);
             println!("reload_ok: {}", d.reload_ok);
             println!("reload_err: {}", d.reload_err);
+            if !d.processes.is_empty() {
+                println!("processes:");
+                for proc in &d.processes {
+                    println!("  - egress_id: {}", proc.egress_id);
+                    println!("    enabled: {}", proc.enabled);
+                    println!("    running: {}", proc.running);
+                    if let Some(pid) = proc.pid {
+                        println!("    pid: {pid}");
+                    }
+                    println!("    restarts: {}", proc.restarts);
+                    if let Some(code) = proc.last_exit_code {
+                        println!("    last_exit_code: {code}");
+                    }
+                    if let Some(err) = &proc.last_error {
+                        println!("    last_error: {err}");
+                    }
+                }
+            }
         }
         Response::Err(e) => {
             println!("error: {}", e.message);

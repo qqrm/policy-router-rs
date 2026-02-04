@@ -67,6 +67,7 @@ Daemon and client communicate via local only IPC.
 ## Build prerequisites
 
 Building requires clang/libclang because the `netstat2` dependency uses bindgen for Windows APIs.
+The project is pinned to Rust nightly via `rust-toolchain.toml`; install it with `rustup toolchain install nightly` (rustfmt/clippy included) and use it when building locally.
 
 ## CLI
 
@@ -224,7 +225,6 @@ Queued small follow-ups (safe to bundle into the next task)
 What is NOT done yet (this is what blocks “project complete”)
 - No traffic interception layer yet (nothing actually routes Windows traffic).
 - No process/domain attribution pipeline for real connections yet (beyond “explain”).
-- No egress process supervision layer yet (starting/stopping sing-box, etc.).
 - No packaging/installation UX yet (service/task, default config layout, logs).
 
 MVP definition (“project complete”)
@@ -235,10 +235,10 @@ On Windows: after installing and starting the daemon, network traffic is routed 
 
 Planned remaining work (estimate: ~8–12 more tasks of similar size)
 
-Phase 2 — Egress supervision (2–3 tasks)
-2.1 Implement EgressSupervisor to start/stop external egress processes (sing-box, etc.) from config.
-2.2 Restart policy (backoff, max restarts, “never” vs “always” vs “on-failure”), structured logging.
-2.3 Wire lifecycle into policy-routerd (Stop request stops children; reload updates desired set).
+Phase 2 — Egress supervision (done)
+- Implemented EgressSupervisor to start/stop external egress processes (sing-box, etc.) from config.
+- Restart policy (backoff, max restarts, “never” vs “always” vs “on-failure”), structured logging.
+- Lifecycle wired into policy-routerd (Stop request stops children; reload updates desired set).
 
 Phase 3 — Traffic interception + routing MVP (3–5 tasks)
 3.1 Define the routing “plumbing” boundary: internal API that takes (process_path?, domain?, dest_ip?, dest_port?) and returns egress id + reason.

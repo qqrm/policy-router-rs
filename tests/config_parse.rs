@@ -15,6 +15,75 @@ fn config_example_validate_ok() {
 }
 
 #[test]
+fn config_process_spec_parses() {
+    let raw = r#"
+[defaults]
+egress = "vpn"
+
+[egress.vpn]
+type = "singbox"
+endpoint = "socks5://127.0.0.1:1488"
+
+[egress.vpn.process]
+enabled = true
+program = "sing-box"
+args = ["run", "-c", "singbox.json"]
+restart = "on-failure"
+backoff_ms = 500
+max_backoff_ms = 10_000
+max_restarts_per_minute = 5
+
+[rules.app]
+vpn = []
+
+[rules.domain]
+vpn = []
+"#;
+    let cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
+    cfg.validate().expect("config must validate");
+    let process = cfg
+        .egress
+        .get(&policy_router_rs::policy::config::EgressId(
+            "vpn".to_string(),
+        ))
+        .and_then(|spec| spec.process.as_ref())
+        .expect("process spec should be present");
+    assert!(process.enabled);
+    assert_eq!(process.program.as_deref(), Some("sing-box"));
+}
+
+#[test]
+fn config_process_spec_parses_when_program_missing() {
+    let raw = r#"
+[defaults]
+egress = "direct"
+
+[egress.direct]
+type = "direct"
+
+[egress.direct.process]
+enabled = false
+
+[rules.app]
+direct = []
+
+[rules.domain]
+direct = []
+"#;
+    let cfg = toml::from_str::<AppConfig>(raw).expect("config must parse");
+    cfg.validate().expect("config must validate");
+    let process = cfg
+        .egress
+        .get(&policy_router_rs::policy::config::EgressId(
+            "direct".to_string(),
+        ))
+        .and_then(|spec| spec.process.as_ref())
+        .expect("process spec should be present");
+    assert!(!process.enabled);
+    assert!(process.program.is_none());
+}
+
+#[test]
 fn config_includes_expand_and_validate() {
     use std::fs;
 

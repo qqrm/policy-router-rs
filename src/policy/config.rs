@@ -266,6 +266,24 @@ impl AppConfig {
                     }
                 }
             }
+
+            if let Some(process) = spec.process.as_ref().filter(|process| process.enabled) {
+                let program = process.program.as_deref().unwrap_or_default().trim();
+                if program.is_empty() {
+                    bail!("egress '{egress_id}' has process enabled with empty program");
+                }
+                if process.backoff_ms == 0 {
+                    bail!("egress '{egress_id}' has process backoff_ms set to 0");
+                }
+                if process.max_backoff_ms > 0 && process.backoff_ms > process.max_backoff_ms {
+                    bail!(
+                        "egress '{egress_id}' has process backoff_ms greater than max_backoff_ms"
+                    );
+                }
+                if process.max_restarts_per_minute == 0 {
+                    bail!("egress '{egress_id}' has process max_restarts_per_minute set to 0");
+                }
+            }
         }
 
         for (egress_id, patterns) in &self.rules.app {
@@ -377,6 +395,8 @@ pub struct EgressSpec {
     #[serde(rename = "type")]
     pub kind: EgressKind,
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub process: Option<ProcessSpec>,
 }
 
 use strum_macros::{Display, IntoStaticStr};
@@ -396,4 +416,49 @@ impl EgressKind {
     pub fn as_str(self) -> &'static str {
         self.into()
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProcessSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default = "default_restart_policy")]
+    pub restart: RestartPolicy,
+    #[serde(default = "default_backoff_ms")]
+    pub backoff_ms: u64,
+    #[serde(default = "default_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+    #[serde(default = "default_max_restarts_per_minute")]
+    pub max_restarts_per_minute: u32,
+}
+
+const fn default_restart_policy() -> RestartPolicy {
+    RestartPolicy::OnFailure
+}
+
+const fn default_backoff_ms() -> u64 {
+    500
+}
+
+const fn default_max_backoff_ms() -> u64 {
+    10_000
+}
+
+const fn default_max_restarts_per_minute() -> u32 {
+    30
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RestartPolicy {
+    Never,
+    OnFailure,
+    Always,
 }
