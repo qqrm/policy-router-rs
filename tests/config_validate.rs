@@ -158,3 +158,57 @@ max_restarts_per_minute = 0
     let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
     assert!(cfg.validate().is_err());
 }
+
+#[test]
+fn validate_allows_exact_and_suffix_same_zone() {
+    let raw = base_config(
+        r#"[egress.main]
+type = "direct"
+
+[egress.proxy]
+type = "direct"
+"#,
+        r#"
+[[rules]]
+egress = "main"
+domain = "example.com"
+
+[[rules]]
+egress = "proxy"
+domain = ".example.com"
+"#,
+    );
+
+    let cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    cfg.validate_into().expect("config must validate");
+}
+
+#[test]
+fn validate_rejects_overlapping_suffix_domains() {
+    let raw = base_config(
+        r#"[egress.main]
+type = "direct"
+
+[egress.proxy]
+type = "direct"
+"#,
+        r#"
+[[rules]]
+egress = "main"
+domain = ".com"
+
+[[rules]]
+egress = "proxy"
+domain = ".example.com"
+"#,
+    );
+
+    let mut cfg = toml::from_str::<AppConfig>(&raw).expect("config must parse");
+    let err = cfg
+        .validate()
+        .expect_err("config must reject overlapping domain suffixes");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("tier 'domain'"));
+    assert!(msg.contains("rule #1"));
+    assert!(msg.contains("rule #2"));
+}
