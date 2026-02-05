@@ -84,8 +84,7 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 
 #[test]
 fn domain_wins_over_app() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("youtube.com"), None);
     assert_eq!(d.egress, eid("proxy"));
@@ -102,8 +101,7 @@ fn domain_wins_over_app() {
 
 #[test]
 fn app_used_when_no_domain_match() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("unknown.example"), None);
     assert_eq!(d.egress, eid("vpn"));
@@ -120,8 +118,7 @@ fn app_used_when_no_domain_match() {
 
 #[test]
 fn default_used_when_nothing_matches() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("notepad.exe"), Some("unknown.example"), None);
     assert_eq!(d.egress, eid("vpn"));
@@ -138,8 +135,7 @@ fn default_used_when_nothing_matches() {
 
 #[test]
 fn domain_suffix_matching_subdomains() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(
         &cfg,
@@ -152,8 +148,7 @@ fn domain_suffix_matching_subdomains() {
 
 #[test]
 fn domain_matching_case_insensitive() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("YouTube.COM"), None);
     assert_eq!(d.egress, eid("proxy"));
@@ -161,8 +156,7 @@ fn domain_matching_case_insensitive() {
 
 #[test]
 fn app_matching_case_insensitive() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("ZEN.EXE"), Some("unknown.example"), None);
     assert_eq!(d.egress, eid("vpn"));
@@ -183,8 +177,10 @@ egress = "vpn"
 app = "zen.exe"
 "#;
 
-    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
-    cfg.validate().expect("config must validate");
+    let cfg = toml::from_str::<AppConfig>(toml)
+        .expect("test config TOML must parse")
+        .validate_into()
+        .expect("config must validate");
 
     let d = decide(
         &cfg,
@@ -206,8 +202,7 @@ app = "zen.exe"
 
 #[test]
 fn reason_includes_suffix_domain_match_details() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(
         &cfg,
@@ -224,8 +219,7 @@ fn reason_includes_suffix_domain_match_details() {
 
 #[test]
 fn reason_includes_exact_app_match_details() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("curl.exe"), Some("unknown.example"), None);
     let reason = d.reason.to_human();
@@ -237,8 +231,7 @@ fn reason_includes_exact_app_match_details() {
 
 #[test]
 fn explicit_direct_app_rule() {
-    let mut cfg = cfg_minimal();
-    cfg.validate().expect("config must validate");
+    let cfg = cfg_minimal().validate_into().expect("config must validate");
 
     let d = decide(&cfg, Some("ciadpi.exe"), Some("youtube.com"), None);
     assert_eq!(d.egress, eid("proxy"));
@@ -298,8 +291,10 @@ app = "zen.exe"
 domain = "example.com"
 "#;
 
-    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
-    cfg.validate().expect("config must validate");
+    let cfg = toml::from_str::<AppConfig>(toml)
+        .expect("test config TOML must parse")
+        .validate_into()
+        .expect("config must validate");
 
     let d = decide(&cfg, Some("zen.exe"), Some("example.com"), None);
     assert_eq!(d.egress, eid("direct"));
@@ -328,8 +323,10 @@ domain = "youtube.com"
 name = "video"
 "#;
 
-    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
-    cfg.validate().expect("config must validate");
+    let cfg = toml::from_str::<AppConfig>(toml)
+        .expect("test config TOML must parse")
+        .validate_into()
+        .expect("config must validate");
 
     let d = decide(&cfg, None, Some("youtube.com"), None);
     assert_eq!(d.egress, eid("proxy"));
@@ -375,6 +372,7 @@ dst_ip_cidr = "@file:cidrs.txt"
     fs::write(&config_path, toml).expect("write config");
 
     let (cfg, deps) = AppConfig::load_from_path_with_deps(&config_path).expect("config must load");
+    let cfg = cfg.validate_into().expect("config must validate");
     let expected_dep = fs::canonicalize(&cidr_path).unwrap_or_else(|_| cidr_path.clone());
     assert!(deps.contains(&expected_dep));
 
@@ -443,8 +441,10 @@ egress = "direct"
 dst_ip_cidr = "not-a-cidr"
 "#;
 
-    let mut cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
-    let err = cfg.validate().expect_err("config must reject invalid CIDR");
+    let cfg = toml::from_str::<AppConfig>(toml).expect("test config TOML must parse");
+    let err = cfg
+        .validate_into()
+        .expect_err("config must reject invalid CIDR");
     let msg = format!("{err:#}");
     assert!(msg.contains("dst_ip_cidr"));
     assert!(msg.contains("valid CIDR"));
