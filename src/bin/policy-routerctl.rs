@@ -33,6 +33,7 @@ enum OutputFormat {
 enum Cmd {
     Status,
     Reload,
+    Apply,
     Stop,
     Diagnostics,
     Explain {
@@ -54,6 +55,7 @@ fn main() -> Result<()> {
     let req = match cli.cmd {
         Cmd::Status => Request::Status,
         Cmd::Reload => Request::Reload,
+        Cmd::Apply => Request::Apply,
         Cmd::Stop => Request::Stop,
         Cmd::Diagnostics => Request::Diagnostics,
         Cmd::Explain {
@@ -125,6 +127,11 @@ fn print_text(resp: &Response, quiet: bool) -> Result<()> {
                 println!("reloaded: true");
             }
         }
+        Response::OkApply => {
+            if !quiet {
+                println!("applied: true");
+            }
+        }
         Response::OkStop => {
             if !quiet {
                 println!("stopping: true");
@@ -162,6 +169,7 @@ fn print_text(resp: &Response, quiet: bool) -> Result<()> {
             println!("ipc_requests: {}", d.ipc_requests);
             println!("reload_ok: {}", d.reload_ok);
             println!("reload_err: {}", d.reload_err);
+            println!("watch_enabled: {}", d.watch_enabled);
             if !d.processes.is_empty() {
                 println!("processes:");
                 for proc in &d.processes {

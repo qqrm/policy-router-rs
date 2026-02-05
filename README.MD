@@ -43,6 +43,7 @@ We split the implementation into three parts:
 - CLI tool to manage the daemon
 - Sends commands via IPC:
   - status
+  - apply
   - reload
   - stop
   - explain
@@ -74,9 +75,11 @@ The project is pinned to Rust nightly via `rust-toolchain.toml`; install it with
 Daemon:
 - policy-routerd --config <path>
 - policy-routerd --log-level <level> (default: info, overridden by RUST_LOG)
+- policy-routerd --watch (dev-only: auto-apply config changes)
 
 Client:
 - policy-routerctl status
+- policy-routerctl apply
 - policy-routerctl reload
 - policy-routerctl stop
 - policy-routerctl explain --process <name> --domain <domain>
@@ -154,7 +157,8 @@ Daemon and ctl:
 - ctl can connect via IPC and request:
   - `explain` decision for (process, domain)
   - `status`
-  - `reload` (re read config)
+  - `apply` (apply config)
+  - `reload` (compat; same behavior as apply)
   - `stop` (clean teardown)
 
 Enforcement (minimal, evolving):
@@ -217,12 +221,12 @@ Current status (implemented and test-covered)
     - Cycle detection + max depth limit (MAX_INCLUDE_DEPTH = 16)
     - Include dependencies are discovered and returned (best-effort canonicalized)
 - Daemon + IPC + CLI
-  - policy-routerd IPC server (status/reload/stop/explain/diagnostics)
+- policy-routerd IPC server (status/apply/reload/stop/explain/diagnostics)
   - policy-routerctl client with text + JSON output
-  - Reload applies new config atomically (ArcSwap) and keeps last-good on failure
-- Auto reload
-  - notify watcher triggers reload on config changes
-  - watcher also watches discovered include dependencies and updates the watch set on reload
+  - Apply/reload applies new config atomically (ArcSwap) and keeps last-good on failure
+- Manual apply (v1)
+  - policy-routerctl apply triggers config load + apply
+  - policy-routerd --watch enables dev-only auto apply on config/include changes
 
 Queued small follow-ups (safe to bundle into the next task)
 - IPC/CLI: expose last_reload_ms in StatusResponse/DiagnosticsResponse and print it in policy-routerctl (serde default for compatibility).
@@ -236,7 +240,7 @@ What is NOT done yet (this is what blocks “project complete”)
 MVP definition (“project complete”)
 On Windows: after installing and starting the daemon, network traffic is routed per config rules:
 - app rules and domain rules select an egress: direct / block / socks5 / singbox
-- config hot-reload works for both config.toml and include list files
+- config apply works for both config.toml and include list files (watch is optional)
 - basic observability exists (status/diagnostics + logs)
 
 Planned remaining work (estimate: ~8–12 more tasks of similar size)
@@ -244,7 +248,7 @@ Planned remaining work (estimate: ~8–12 more tasks of similar size)
 Phase 2 — Egress supervision (done)
 - Implemented EgressSupervisor to start/stop external egress processes (sing-box, etc.) from config.
 - Restart policy (backoff, max restarts, “never” vs “always” vs “on-failure”), structured logging.
-- Lifecycle wired into policy-routerd (Stop request stops children; reload updates desired set).
+- Lifecycle wired into policy-routerd (Stop request stops children; apply/reload updates desired set).
 
 Phase 3 — Traffic interception + routing MVP (3–5 tasks)
 3.1 Define the routing “plumbing” boundary: internal API that takes (process_path?, domain?, dest_ip?, dest_port?) and returns egress id + reason.

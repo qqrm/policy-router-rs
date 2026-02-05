@@ -45,6 +45,9 @@ struct Cli {
 
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    #[arg(long, default_value_t = false)]
+    watch: bool,
 }
 
 #[derive(Debug)]
@@ -52,6 +55,7 @@ struct State {
     started_at: Instant,
     config_path: PathBuf,
     socket: String,
+    watch_enabled: bool,
     runtime: ArcSwap<RuntimeConfig>,
     include_deps: ArcSwap<Vec<PathBuf>>,
     running: AtomicBool,
@@ -113,6 +117,7 @@ fn main() -> Result<()> {
         started_at: Instant::now(),
         config_path: cli.config,
         socket: socket_label,
+        watch_enabled: cli.watch,
         runtime: ArcSwap::from_pointee(runtime),
         include_deps: ArcSwap::from_pointee(deps),
         running: AtomicBool::new(true),
@@ -142,7 +147,12 @@ fn main() -> Result<()> {
         .create_sync()
         .context("failed to create IPC listener")?;
 
-    let watcher_handle = spawn_config_watcher(Arc::clone(&state));
+    let watcher_handle = if cli.watch {
+        info!("watch enabled");
+        Some(spawn_config_watcher(Arc::clone(&state)))
+    } else {
+        None
+    };
 
     let runtime = state.runtime.load();
     apply_desired_if_running(&state, &runtime.cfg);
@@ -175,8 +185,13 @@ fn main() -> Result<()> {
 
     cleanup_fs_socket(fs_socket_path.as_ref());
 
-    if let Err(err) = watcher_handle.join() {
-        warn!(error = ?err, "config watcher thread join failed");
+    if let Some(handle) = watcher_handle {
+        match handle.join() {
+            Ok(()) => {}
+            Err(err) => {
+                warn!(error = ?err, "config watcher thread join failed");
+            }
+        }
     }
 
     Ok(())
@@ -427,18 +442,15 @@ fn handle_conn(state: &Arc<State>, mut conn: interprocess::local_socket::Stream)
 fn handle_request(state: &State, req: Request) -> Response {
     match req {
         Request::Status => Response::OkStatus(build_status(state)),
-        Request::Reload => match reload_config(state) {
-            Ok(()) => {
-                info!("reloaded config");
-                Response::OkReload
-            }
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "reload failed");
-                Response::Err(ErrorResponse {
-                    message: format!("reload failed for {}: {:#}", state.config_path.display(), e),
-                })
-            }
-        },
+        Request::Reload => reload_config_response(
+            state,
+            Response::OkReload,
+            "reloaded config",
+            "reload failed",
+        ),
+        Request::Apply => {
+            reload_config_response(state, Response::OkApply, "applied config", "apply failed")
+        }
         Request::Stop => {
             state.running.store(false, Ordering::SeqCst);
             info!("stop requested");
@@ -495,11 +507,32 @@ fn build_diagnostics(state: &State) -> DiagnosticsResponse {
         ipc_requests: state.ipc_requests.load(std::sync::atomic::Ordering::SeqCst),
         reload_ok: state.reload_ok.load(std::sync::atomic::Ordering::SeqCst),
         reload_err: state.reload_err.load(std::sync::atomic::Ordering::SeqCst),
+        watch_enabled: state.watch_enabled,
         processes: state
             .supervisor_status
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default(),
+    }
+}
+
+fn reload_config_response(
+    state: &State,
+    ok_response: Response,
+    ok_log: &str,
+    err_label: &str,
+) -> Response {
+    match reload_config(state) {
+        Ok(()) => {
+            info!(message = ok_log);
+            ok_response
+        }
+        Err(e) => {
+            warn!(error = %format!("{e:#}"), "{err_label}");
+            Response::Err(ErrorResponse {
+                message: format!("{err_label} for {}: {:#}", state.config_path.display(), e),
+            })
+        }
     }
 }
 
@@ -706,6 +739,7 @@ mod tests {
             started_at: Instant::now(),
             config_path,
             socket: "test.sock".to_owned(),
+            watch_enabled: false,
             runtime: ArcSwap::from_pointee(runtime),
             include_deps: ArcSwap::from_pointee(deps),
             running: AtomicBool::new(true),

@@ -110,6 +110,10 @@ fn spawn_stateful_server(
                     state = 1;
                     Response::OkReload
                 }
+                Request::Apply => {
+                    state = 1;
+                    Response::OkApply
+                }
                 Request::Stop => {
                     write_json_line(&mut conn, &Response::OkStop)
                         .expect("failed to write response");
@@ -144,6 +148,7 @@ fn spawn_stateful_server(
                     ipc_requests: 1,
                     reload_ok: 0,
                     reload_err: 0,
+                    watch_enabled: false,
                     processes: Vec::new(),
                 }),
             };
