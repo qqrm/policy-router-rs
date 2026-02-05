@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 
 use super::config::{
-    AppConfig, EgressId, Rule, RuleTier, normalize_domain, normalize_process_name,
+    EgressId, Rule, RuleTier, ValidatedAppConfig, normalize_domain, normalize_process_name,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +131,7 @@ pub struct CompiledEngine {
 
 impl CompiledEngine {
     #[must_use]
-    pub fn compile(cfg: &AppConfig) -> Self {
+    pub fn compile(cfg: &ValidatedAppConfig) -> Self {
         let mut app_domain_rules = Vec::new();
         let mut domain_rules = Vec::new();
         let mut dst_ip_rules = Vec::new();
@@ -214,13 +214,13 @@ impl CompiledEngine {
 }
 
 #[must_use]
-pub fn compile(cfg: &AppConfig) -> CompiledEngine {
+pub fn compile(cfg: &ValidatedAppConfig) -> CompiledEngine {
     CompiledEngine::compile(cfg)
 }
 
 #[must_use]
 pub fn decide(
-    cfg: &AppConfig,
+    cfg: &ValidatedAppConfig,
     process_name: Option<&str>,
     domain: Option<&str>,
     dst_ip: Option<IpAddr>,
@@ -364,6 +364,7 @@ fn domain_is_suffix(domain: &str, suffix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::config::AppConfig;
 
     fn cfg_for_rules(rules: &str) -> AppConfig {
         let toml = format!(
@@ -408,19 +409,26 @@ domain = "example.com"
 
 [[rules]]
 egress = "direct"
-domain = ".example.com"
+domain = "example.net"
 "#,
         );
 
+        let cfg = cfg.validate_into().expect("config must validate");
         let engine = CompiledEngine::compile(&cfg);
-        let decision = engine.decide(None, Some("example.com"), None);
+        let decision = engine.decide(None, Some("example.net"), None);
 
-        assert_eq!(decision.egress, EgressId("proxy".to_string()));
+        assert_eq!(decision.egress, EgressId("direct".to_string()));
+        match decision.reason {
+            DecisionReason::RuleMatch { rule_index, .. } => {
+                assert_eq!(rule_index, 2);
+            }
+            DecisionReason::Default { .. } => panic!("unexpected default decision"),
+        }
     }
 
     #[test]
     fn app_domain_overrides_domain_and_app() {
-        let mut cfg = cfg_for_rules(
+        let cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -436,8 +444,7 @@ app = "chat.exe"
 domain = "example.com"
 "#,
         );
-        cfg.validate().expect("config must validate");
-
+        let cfg = cfg.validate_into().expect("config must validate");
         let engine = CompiledEngine::compile(&cfg);
         let decision = engine.decide(Some("chat.exe"), Some("example.com"), None);
 
@@ -446,7 +453,7 @@ domain = "example.com"
 
     #[test]
     fn unknown_domain_falls_back_to_app() {
-        let mut cfg = cfg_for_rules(
+        let cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -457,8 +464,7 @@ egress = "alpha"
 app = "chat.exe"
 "#,
         );
-        cfg.validate().expect("config must validate");
-
+        let cfg = cfg.validate_into().expect("config must validate");
         let engine = CompiledEngine::compile(&cfg);
         let decision = engine.decide(Some("chat.exe"), None, None);
 
@@ -488,7 +494,7 @@ domain = ".com"
 
     #[test]
     fn dst_ip_cidr_matches_and_conflicts() {
-        let mut cfg = cfg_for_rules(
+        let cfg = cfg_for_rules(
             r#"
 [[rules]]
 egress = "proxy"
@@ -499,8 +505,7 @@ egress = "direct"
 app = "chat.exe"
 "#,
         );
-        cfg.validate().expect("config must validate");
-
+        let cfg = cfg.validate_into().expect("config must validate");
         let engine = CompiledEngine::compile(&cfg);
         let decision = engine.decide(Some("chat.exe"), None, Some("10.0.0.42".parse().unwrap()));
 

@@ -26,7 +26,7 @@ use policy_router_rs::{
         write_json_line,
     },
     policy::{
-        config::{AppConfig, RuleTier},
+        config::{AppConfig, RuleTier, ValidatedAppConfig},
         engine,
     },
     supervisor::{DesiredProcess, Supervisor, SupervisorCmd},
@@ -66,7 +66,7 @@ struct State {
 
 #[derive(Debug)]
 struct RuntimeConfig {
-    cfg: AppConfig,
+    cfg: ValidatedAppConfig,
     engine: engine::CompiledEngine,
 }
 
@@ -91,6 +91,7 @@ fn main() -> Result<()> {
         .init();
 
     let (cfg, deps) = AppConfig::load_from_path_with_deps(&cli.config)?;
+    let cfg = cfg.validate_into()?;
     let runtime = RuntimeConfig {
         engine: engine::CompiledEngine::compile(&cfg),
         cfg,
@@ -513,6 +514,7 @@ fn reload_config(state: &State) -> Result<()> {
         }
     };
 
+    let next = next.validate_into()?;
     let runtime = RuntimeConfig {
         engine: engine::CompiledEngine::compile(&next),
         cfg: next,
@@ -687,14 +689,14 @@ mod tests {
         }
     }
 
-    fn load_example_config() -> AppConfig {
+    fn load_example_config() -> ValidatedAppConfig {
         let raw = include_str!("../../config/config.example.toml");
-        let mut cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
-        cfg.validate().expect("config.example.toml must validate");
-        cfg
+        let cfg = toml::from_str::<AppConfig>(raw).expect("config.example.toml must parse");
+        cfg.validate_into()
+            .expect("config.example.toml must validate")
     }
 
-    fn make_state(config_path: PathBuf, cfg: AppConfig) -> State {
+    fn make_state(config_path: PathBuf, cfg: ValidatedAppConfig) -> State {
         let runtime = RuntimeConfig {
             engine: engine::CompiledEngine::compile(&cfg),
             cfg,
@@ -754,7 +756,10 @@ mod tests {
 
         // Initial valid config from example
         write_file(&path, include_str!("../../config/config.example.toml"));
-        let original_cfg = AppConfig::load_from_path(&path).expect("must load initial config");
+        let original_cfg = AppConfig::load_from_path(&path)
+            .expect("must load initial config")
+            .validate_into()
+            .expect("config must validate");
 
         let state = make_state(path.clone(), original_cfg);
 

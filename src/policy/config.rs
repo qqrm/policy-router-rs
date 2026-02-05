@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fmt, fs,
+    ops::Deref,
     path::{Path, PathBuf},
 };
 
@@ -15,6 +16,17 @@ pub struct AppConfig {
     pub egress: BTreeMap<EgressId, EgressSpec>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedAppConfig(pub AppConfig);
+
+impl Deref for ValidatedAppConfig {
+    type Target = AppConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 const INCLUDE_PREFIX: &str = "@file:";
@@ -62,6 +74,16 @@ impl AppConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let (cfg, _deps) = Self::load_from_path_with_deps(path)?;
         Ok(cfg)
+    }
+
+    /// Validates configuration invariants and returns a validated wrapper.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails.
+    pub fn validate_into(mut self) -> Result<ValidatedAppConfig> {
+        self.validate()?;
+        Ok(ValidatedAppConfig(self))
     }
 
     fn expand_includes_collecting(

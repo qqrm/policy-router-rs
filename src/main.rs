@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     let config_path = resolve_config_path(args.config.as_deref())?;
 
     tracing::info!(config = %config_path.display(), "using config");
-    let cfg = AppConfig::load_from_path(&config_path)?;
+    let cfg = AppConfig::load_from_path(&config_path)?.validate_into()?;
 
     let dst_ip = match args.dst_ip.as_deref() {
         Some(raw) => Some(
