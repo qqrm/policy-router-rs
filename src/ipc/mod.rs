@@ -60,6 +60,7 @@ fn looks_like_fs_path(s: &str) -> bool {
 pub enum Request {
     Status,
     Reload,
+    Apply,
     Stop,
     Explain(ExplainRequest),
     Diagnostics,
@@ -78,6 +79,7 @@ pub struct ExplainRequest {
 pub enum Response {
     OkStatus(StatusResponse),
     OkReload,
+    OkApply,
     OkStop,
     OkExplain(ExplainResponse),
     OkDiagnostics(DiagnosticsResponse),
@@ -105,6 +107,8 @@ pub struct DiagnosticsResponse {
     pub ipc_requests: u64,
     pub reload_ok: u64,
     pub reload_err: u64,
+    #[serde(default)]
+    pub watch_enabled: bool,
     #[serde(default)]
     pub processes: Vec<ProcessStatus>,
 }
