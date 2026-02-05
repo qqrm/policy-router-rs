@@ -159,14 +159,12 @@ expand one field per rule to avoid cartesian expansion"
         for app_value in &app_values {
             for domain_value in &domain_values {
                 for cidr_value in &cidr_values {
-                    expanded.push(Rule {
-                        egress: rule.egress.clone(),
-                        app: app_value.clone(),
-                        domain: domain_value.clone(),
-                        dst_ip_cidr: cidr_value.clone(),
-                        dst_ip_cidr_parsed: None,
-                        name: rule.name.clone(),
-                    });
+                    expanded.push(Rule::expanded_clone_from(
+                        rule,
+                        app_value.clone(),
+                        domain_value.clone(),
+                        cidr_value.clone(),
+                    ));
                 }
             }
         }
@@ -415,6 +413,10 @@ use dst_ip_cidr alone or split into separate rules"
                 .domain
                 .as_ref()
                 .and_then(|domain| normalize_domain_pattern(domain.as_str()));
+            let domain_is_suffix = rule
+                .domain
+                .as_ref()
+                .is_some_and(|domain| domain.as_str().trim().starts_with('.'));
             let cidr_parsed = if let Some(raw) = rule.dst_ip_cidr.as_ref() {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
@@ -439,6 +441,7 @@ use dst_ip_cidr alone or split into separate rules"
                 rule,
                 app_normalized,
                 domain_suffix,
+                domain_is_suffix,
             };
 
             match tier {
@@ -523,6 +526,24 @@ pub struct Rule {
     pub name: Option<String>,
 }
 
+impl Rule {
+    fn expanded_clone_from(
+        rule: &Self,
+        app: Option<AppPattern>,
+        domain: Option<DomainPattern>,
+        dst_ip_cidr: Option<String>,
+    ) -> Self {
+        Self {
+            egress: rule.egress.clone(),
+            app,
+            domain,
+            dst_ip_cidr,
+            dst_ip_cidr_parsed: None,
+            name: rule.name.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct AppPattern(pub String);
@@ -573,6 +594,7 @@ struct RuleInfo<'a> {
     rule: &'a Rule,
     app_normalized: Option<String>,
     domain_suffix: Option<String>,
+    domain_is_suffix: bool,
 }
 
 const fn rule_tier(rule: &Rule) -> RuleTier {
@@ -623,6 +645,20 @@ fn domain_suffix_overlaps(left: &str, right: &str) -> bool {
     domain_is_suffix(left, right) || domain_is_suffix(right, left)
 }
 
+fn domain_patterns_conflict(left: &RuleInfo<'_>, right: &RuleInfo<'_>) -> bool {
+    let Some(left_domain) = left.domain_suffix.as_ref() else {
+        return false;
+    };
+    let Some(right_domain) = right.domain_suffix.as_ref() else {
+        return false;
+    };
+    match (left.domain_is_suffix, right.domain_is_suffix) {
+        (true, true) => domain_suffix_overlaps(left_domain, right_domain),
+        (false, false) => left_domain == right_domain,
+        _ => false,
+    }
+}
+
 fn domain_is_suffix(domain: &str, suffix: &str) -> bool {
     if domain.len() <= suffix.len() {
         return false;
@@ -649,13 +685,7 @@ fn detect_conflicts_app_domain(rules: &[RuleInfo<'_>]) -> Result<()> {
             if left_app != right_app {
                 continue;
             }
-            let Some(left_domain) = left.domain_suffix.as_ref() else {
-                continue;
-            };
-            let Some(right_domain) = right.domain_suffix.as_ref() else {
-                continue;
-            };
-            if domain_suffix_overlaps(left_domain, right_domain) {
+            if domain_patterns_conflict(left, right) {
                 bail_conflict(
                     RuleTier::AppDomain,
                     left,
@@ -671,13 +701,7 @@ fn detect_conflicts_app_domain(rules: &[RuleInfo<'_>]) -> Result<()> {
 fn detect_conflicts_domain(rules: &[RuleInfo<'_>]) -> Result<()> {
     for (i, left) in rules.iter().enumerate() {
         for right in rules.iter().skip(i + 1) {
-            let Some(left_domain) = left.domain_suffix.as_ref() else {
-                continue;
-            };
-            let Some(right_domain) = right.domain_suffix.as_ref() else {
-                continue;
-            };
-            if domain_suffix_overlaps(left_domain, right_domain) {
+            if domain_patterns_conflict(left, right) {
                 bail_conflict(
                     RuleTier::Domain,
                     left,

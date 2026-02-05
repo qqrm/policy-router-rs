@@ -409,18 +409,18 @@ domain = "example.com"
 
 [[rules]]
 egress = "direct"
-domain = "example.net"
+domain = ".example.com"
 "#,
         );
 
         let cfg = cfg.validate_into().expect("config must validate");
         let engine = CompiledEngine::compile(&cfg);
-        let decision = engine.decide(None, Some("example.net"), None);
+        let decision = engine.decide(None, Some("example.com"), None);
 
-        assert_eq!(decision.egress, EgressId("direct".to_string()));
+        assert_eq!(decision.egress, EgressId("proxy".to_string()));
         match decision.reason {
             DecisionReason::RuleMatch { rule_index, .. } => {
-                assert_eq!(rule_index, 2);
+                assert_eq!(rule_index, 1);
             }
             DecisionReason::Default { .. } => panic!("unexpected default decision"),
         }
@@ -481,7 +481,7 @@ domain = "example.com"
 
 [[rules]]
 egress = "direct"
-domain = ".com"
+domain = "EXAMPLE.COM"
 "#,
         );
 
