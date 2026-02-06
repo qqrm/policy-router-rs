@@ -686,32 +686,25 @@ fn build_desired_processes(cfg: &AppConfig) -> Vec<DesiredProcess> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs};
+    use std::{
+        collections::HashSet,
+        fs,
+        io::{Seek, SeekFrom, Write},
+    };
 
     use notify::EventKind;
+    use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
 
-    fn write_file(path: &PathBuf, contents: &str) {
-        fs::write(path, contents).expect("failed to write temp config");
-    }
-
-    fn tmp_path(tag: &str) -> PathBuf {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-
-        std::env::temp_dir().join(format!("policy-router-{tag}-{pid}-{nanos}.toml"))
-    }
-
-    fn tmp_dir(tag: &str) -> PathBuf {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-
-        std::env::temp_dir().join(format!("policy-router-{tag}-{pid}-{nanos}"))
+    fn write_tempfile(file: &mut NamedTempFile, contents: &str) {
+        let handle = file.as_file_mut();
+        handle.seek(SeekFrom::Start(0)).expect("seek temp config");
+        handle.set_len(0).expect("truncate temp config");
+        handle
+            .write_all(contents.as_bytes())
+            .expect("write temp config");
+        handle.sync_all().expect("sync temp config");
     }
 
     fn mk_event(kind: notify::EventKind, paths: Vec<PathBuf>) -> notify::Event {
@@ -755,16 +748,17 @@ mod tests {
 
     #[test]
     fn reload_invalid_config_keeps_old() {
-        let path = tmp_path("reload-invalid");
+        let mut file = NamedTempFile::new().expect("create temp config");
+        let path = file.path().to_path_buf();
 
         // Initial valid config
         let original_cfg = load_example_config();
-        write_file(&path, include_str!("../../config/config.example.toml"));
+        write_tempfile(&mut file, include_str!("../../config/config.example.toml"));
 
         let state = make_state(path.clone(), original_cfg.clone());
 
         // Break the file
-        write_file(&path, "this = [ is not valid toml");
+        write_tempfile(&mut file, "this = [ is not valid toml");
 
         // Reload must fail
         let err = reload_config(&state).err();
@@ -779,17 +773,15 @@ mod tests {
 
         assert_eq!(state.reload_ok.load(Ordering::Relaxed), 0);
         assert_eq!(state.reload_err.load(Ordering::Relaxed), 1);
-
-        // Best effort cleanup
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn reload_valid_config_updates_state() {
-        let path = tmp_path("reload-valid");
+        let mut file = NamedTempFile::new().expect("create temp config");
+        let path = file.path().to_path_buf();
 
         // Initial valid config from example
-        write_file(&path, include_str!("../../config/config.example.toml"));
+        write_tempfile(&mut file, include_str!("../../config/config.example.toml"));
         let original_cfg = AppConfig::load_from_path(&path)
             .expect("must load initial config")
             .validate_into()
@@ -807,7 +799,7 @@ egress = "direct"
 type = "direct"
 "#;
 
-        write_file(&path, next_raw);
+        write_tempfile(&mut file, next_raw);
 
         // Reload must succeed
         reload_config(&state).expect("reload should succeed");
@@ -818,28 +810,25 @@ type = "direct"
 
         assert_eq!(state.reload_ok.load(Ordering::Relaxed), 1);
         assert_eq!(state.reload_err.load(Ordering::Relaxed), 0);
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn reload_invalid_config_returns_error_with_path() {
-        let path = tmp_path("reload-invalid-path");
+        let mut file = NamedTempFile::new().expect("create temp config");
+        let path = file.path().to_path_buf();
 
-        write_file(&path, "this = [ is not valid toml");
+        write_tempfile(&mut file, "this = [ is not valid toml");
 
         let state = make_state(path.clone(), load_example_config());
 
         let err = reload_config(&state).expect_err("reload should fail");
         assert!(err.to_string().contains(&path.display().to_string()));
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn reload_event_triggers_on_config_path() {
-        let dir = tmp_dir("reload-event-config");
-        let config_path = dir.join("config.toml");
+        let dir = TempDir::new().expect("create temp dir");
+        let config_path = dir.path().join("config.toml");
         let watched_includes = HashSet::new();
 
         let event = mk_event(
@@ -852,8 +841,8 @@ type = "direct"
 
     #[test]
     fn reload_event_triggers_on_include_canonicalization() {
-        let dir = tmp_dir("reload-event-include");
-        let include_real = dir.join("lists").join("vpn.txt");
+        let dir = TempDir::new().expect("create temp dir");
+        let include_real = dir.path().join("lists").join("vpn.txt");
         fs::create_dir_all(include_real.parent().expect("include parent"))
             .expect("create include dir");
         fs::write(&include_real, "data").expect("write include file");
@@ -862,7 +851,12 @@ type = "direct"
         let mut watched_includes = HashSet::new();
         watched_includes.insert(watched_key);
 
-        let noncanonical = dir.join("lists").join("..").join("lists").join("vpn.txt");
+        let noncanonical = dir
+            .path()
+            .join("lists")
+            .join("..")
+            .join("lists")
+            .join("vpn.txt");
         let event = mk_event(
             EventKind::Modify(notify::event::ModifyKind::Any),
             vec![noncanonical],
@@ -870,18 +864,16 @@ type = "direct"
 
         assert!(should_reload_event(
             &event,
-            &dir.join("config.toml"),
+            &dir.path().join("config.toml"),
             &watched_includes
         ));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reload_event_ignores_unrelated_path() {
-        let dir = tmp_dir("reload-event-unrelated");
-        let config_path = dir.join("config.toml");
-        let include_real = dir.join("lists").join("vpn.txt");
+        let dir = TempDir::new().expect("create temp dir");
+        let config_path = dir.path().join("config.toml");
+        let include_real = dir.path().join("lists").join("vpn.txt");
         fs::create_dir_all(include_real.parent().expect("include parent"))
             .expect("create include dir");
         fs::write(&include_real, "data").expect("write include file");
@@ -890,7 +882,7 @@ type = "direct"
         let mut watched_includes = HashSet::new();
         watched_includes.insert(watched_key);
 
-        let other = dir.join("other.txt");
+        let other = dir.path().join("other.txt");
         let event = mk_event(
             EventKind::Modify(notify::event::ModifyKind::Any),
             vec![other],
@@ -901,14 +893,12 @@ type = "direct"
             &config_path,
             &watched_includes
         ));
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reload_event_ignores_irrelevant_kind() {
-        let dir = tmp_dir("reload-event-kind");
-        let config_path = dir.join("config.toml");
+        let dir = TempDir::new().expect("create temp dir");
+        let config_path = dir.path().join("config.toml");
         let watched_includes = HashSet::new();
 
         let event = mk_event(
