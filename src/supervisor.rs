@@ -22,64 +22,61 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_millis(200);
 #[allow(clippy::duration_suboptimal_units)]
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
-#[cfg(windows)]
+#[cfg(all(target_os = "windows", feature = "windows"))]
 mod winjob {
-    use std::{ffi::c_void, mem::MaybeUninit, os::windows::process::ChildExt, ptr};
+    use std::os::windows::process::ChildExt;
 
-    type BOOL = i32;
-    type DWORD = u32;
-    type HANDLE = *mut c_void;
-    type LONG = i32;
-    type SIZE_T = usize;
-    type ULONGLONG = u64;
+    use anyhow::Context;
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        },
+    };
 
-    const FALSE: BOOL = 0;
-    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: DWORD = 9;
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: DWORD = 0x0000_2000;
-
-    #[repr(C)]
-    struct IO_COUNTERS {
-        read_operation_count: ULONGLONG,
-        write_operation_count: ULONGLONG,
-        other_operation_count: ULONGLONG,
-        read_transfer_count: ULONGLONG,
-        write_transfer_count: ULONGLONG,
-        other_transfer_count: ULONGLONG,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        per_process_user_time_limit: i64,
-        per_job_user_time_limit: i64,
-        limit_flags: DWORD,
-        minimum_working_set_size: SIZE_T,
-        maximum_working_set_size: SIZE_T,
-        active_process_limit: DWORD,
-        affinity: usize,
-        priority_class: DWORD,
-        scheduling_class: DWORD,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        io_info: IO_COUNTERS,
-        process_memory_limit: SIZE_T,
-        job_memory_limit: SIZE_T,
-        peak_process_memory_used: SIZE_T,
-        peak_job_memory_used: SIZE_T,
-    }
-
-    extern "system" {
-        fn CreateJobObjectW(job_attributes: *mut c_void, name: *const u16) -> HANDLE;
-        fn SetInformationJobObject(
+    trait WinjobApi {
+        fn create_job(&self) -> windows::core::Result<HANDLE>;
+        fn set_information(
+            &self,
             job: HANDLE,
-            job_object_info_class: DWORD,
-            job_object_info: *mut c_void,
-            job_object_info_length: DWORD,
-        ) -> BOOL;
-        fn AssignProcessToJobObject(job: HANDLE, process: HANDLE) -> BOOL;
-        fn CloseHandle(handle: HANDLE) -> BOOL;
+            info: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        ) -> windows::core::Result<()>;
+        fn assign_process(&self, job: HANDLE, process: HANDLE) -> windows::core::Result<()>;
+        fn close_handle(&self, handle: HANDLE) -> windows::core::Result<()>;
+    }
+
+    #[derive(Debug, Default)]
+    struct SystemWinjobApi;
+
+    impl WinjobApi for SystemWinjobApi {
+        fn create_job(&self) -> windows::core::Result<HANDLE> {
+            unsafe { CreateJobObjectW(None, None) }
+        }
+
+        fn set_information(
+            &self,
+            job: HANDLE,
+            info: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        ) -> windows::core::Result<()> {
+            unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    info as *const _ as *const _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            }
+        }
+
+        fn assign_process(&self, job: HANDLE, process: HANDLE) -> windows::core::Result<()> {
+            unsafe { AssignProcessToJobObject(job, process) }
+        }
+
+        fn close_handle(&self, handle: HANDLE) -> windows::core::Result<()> {
+            unsafe { CloseHandle(handle) }
+        }
     }
 
     #[derive(Debug)]
@@ -88,41 +85,31 @@ mod winjob {
     }
 
     impl JobHandle {
-        pub(super) fn new(child: &std::process::Child) -> Result<Self, String> {
-            unsafe {
-                let handle = CreateJobObjectW(ptr::null_mut(), ptr::null());
-                if handle.is_null() {
-                    return Err("CreateJobObjectW failed".to_string());
-                }
-                let mut info = MaybeUninit::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>::zeroed();
-                let mut info = info.assume_init();
-                info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                let ok = SetInformationJobObject(
-                    handle,
-                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                    ptr::addr_of_mut!(info).cast(),
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
-                );
-                if ok == FALSE {
-                    let _ = CloseHandle(handle);
-                    return Err("SetInformationJobObject failed".to_string());
-                }
-                let proc_handle = child.as_raw_handle() as HANDLE;
-                let ok = AssignProcessToJobObject(handle, proc_handle);
-                if ok == FALSE {
-                    let _ = CloseHandle(handle);
-                    return Err("AssignProcessToJobObject failed".to_string());
-                }
-                Ok(Self { handle })
+        pub(super) fn new(child: &std::process::Child) -> anyhow::Result<Self> {
+            let api = SystemWinjobApi::default();
+            Self::new_with_api(child, &api)
+        }
+
+        fn new_with_api(child: &std::process::Child, api: &dyn WinjobApi) -> anyhow::Result<Self> {
+            let handle = api.create_job().context("CreateJobObjectW failed")?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if let Err(err) = api.set_information(handle, &info) {
+                let _ = api.close_handle(handle);
+                return Err(anyhow::Error::new(err).context("SetInformationJobObject failed"));
             }
+            let proc_handle = HANDLE(child.as_raw_handle() as *mut _);
+            if let Err(err) = api.assign_process(handle, proc_handle) {
+                let _ = api.close_handle(handle);
+                return Err(anyhow::Error::new(err).context("AssignProcessToJobObject failed"));
+            }
+            Ok(Self { handle })
         }
 
         pub(super) fn close(&mut self) {
-            if !self.handle.is_null() {
-                unsafe {
-                    let _ = CloseHandle(self.handle);
-                }
-                self.handle = ptr::null_mut();
+            if !self.handle.is_invalid() {
+                let _ = unsafe { CloseHandle(self.handle) };
+                self.handle = HANDLE::default();
             }
         }
     }
@@ -130,6 +117,103 @@ mod winjob {
     impl Drop for JobHandle {
         fn drop(&mut self) {
             self.close();
+        }
+    }
+
+    #[cfg(all(test, target_os = "windows", feature = "windows"))]
+    mod tests {
+        use std::{
+            process::Command,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
+
+        use windows::{
+            Win32::{Foundation::HANDLE, System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION},
+            core::{Error as WindowsError, HRESULT},
+        };
+
+        use super::{JobHandle, WinjobApi};
+
+        struct StubApi {
+            create_result: windows::core::Result<HANDLE>,
+            set_result: windows::core::Result<()>,
+            assign_result: windows::core::Result<()>,
+            close_calls: AtomicUsize,
+        }
+
+        impl WinjobApi for StubApi {
+            fn create_job(&self) -> windows::core::Result<HANDLE> {
+                self.create_result.clone()
+            }
+
+            fn set_information(
+                &self,
+                _job: HANDLE,
+                _info: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            ) -> windows::core::Result<()> {
+                self.set_result.clone()
+            }
+
+            fn assign_process(&self, _job: HANDLE, _process: HANDLE) -> windows::core::Result<()> {
+                self.assign_result.clone()
+            }
+
+            fn close_handle(&self, _handle: HANDLE) -> windows::core::Result<()> {
+                self.close_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        fn spawn_child() -> std::process::Child {
+            Command::new("cmd")
+                .args(["/C", "exit", "0"])
+                .spawn()
+                .expect("spawn child")
+        }
+
+        #[test]
+        fn job_handle_reports_create_error() {
+            let child = spawn_child();
+            let api = StubApi {
+                create_result: Err(WindowsError::from_hresult(HRESULT(0x80070005))),
+                set_result: Ok(()),
+                assign_result: Ok(()),
+                close_calls: AtomicUsize::new(0),
+            };
+            let err = JobHandle::new_with_api(&child, &api).unwrap_err();
+            assert!(err.to_string().contains("CreateJobObjectW failed"));
+            assert!(err.to_string().contains("0x80070005"));
+            assert_eq!(api.close_calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn job_handle_closes_on_set_information_error() {
+            let child = spawn_child();
+            let api = StubApi {
+                create_result: Ok(HANDLE(1 as *mut _)),
+                set_result: Err(WindowsError::from_hresult(HRESULT(0x80070057))),
+                assign_result: Ok(()),
+                close_calls: AtomicUsize::new(0),
+            };
+            let err = JobHandle::new_with_api(&child, &api).unwrap_err();
+            assert!(err.to_string().contains("SetInformationJobObject failed"));
+            assert!(err.to_string().contains("0x80070057"));
+            assert_eq!(api.close_calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn job_handle_closes_on_assign_error() {
+            let child = spawn_child();
+            let api = StubApi {
+                create_result: Ok(HANDLE(1 as *mut _)),
+                set_result: Ok(()),
+                assign_result: Err(WindowsError::from_hresult(HRESULT(0x80070006))),
+                close_calls: AtomicUsize::new(0),
+            };
+            let err = JobHandle::new_with_api(&child, &api).unwrap_err();
+            assert!(err.to_string().contains("AssignProcessToJobObject failed"));
+            assert!(err.to_string().contains("0x80070006"));
+            assert_eq!(api.close_calls.load(Ordering::SeqCst), 1);
         }
     }
 }
@@ -301,7 +385,7 @@ struct SupervisedProcess {
     rate_limited_until: Option<Instant>,
     started_once: bool,
     last_desired_enabled: bool,
-    #[cfg(windows)]
+    #[cfg(all(target_os = "windows", feature = "windows"))]
     job: Option<winjob::JobHandle>,
 }
 
@@ -322,7 +406,7 @@ impl SupervisedProcess {
             rate_limited_until: None,
             started_once: false,
             last_desired_enabled,
-            #[cfg(windows)]
+            #[cfg(all(target_os = "windows", feature = "windows"))]
             job: None,
         }
     }
@@ -363,11 +447,11 @@ impl SupervisedProcess {
 
         match cmd.spawn() {
             Ok(child) => {
-                #[cfg(windows)]
+                #[cfg(all(target_os = "windows", feature = "windows"))]
                 let mut child = child;
-                #[cfg(not(windows))]
+                #[cfg(not(all(target_os = "windows", feature = "windows")))]
                 let child = child;
-                #[cfg(windows)]
+                #[cfg(all(target_os = "windows", feature = "windows"))]
                 let job = match winjob::JobHandle::new(&child) {
                     Ok(job) => Some(job),
                     Err(err) => {
@@ -380,7 +464,7 @@ impl SupervisedProcess {
                 };
                 info!(egress = %egress_id, pid = child.id(), "process started");
                 self.child = Some(child);
-                #[cfg(windows)]
+                #[cfg(all(target_os = "windows", feature = "windows"))]
                 {
                     self.job = job;
                 }
@@ -403,7 +487,7 @@ impl SupervisedProcess {
 
     fn stop_child(&mut self, reason: &str, egress_id: &EgressId) {
         self.next_restart_at = None;
-        #[cfg(windows)]
+        #[cfg(all(target_os = "windows", feature = "windows"))]
         if let Some(mut job) = self.job.take() {
             job.close();
         }
@@ -426,7 +510,7 @@ impl SupervisedProcess {
             Ok(Some(status)) => {
                 self.last_exit_code = status.code();
                 self.child = None;
-                #[cfg(windows)]
+                #[cfg(all(target_os = "windows", feature = "windows"))]
                 if let Some(mut job) = self.job.take() {
                     job.close();
                 }
