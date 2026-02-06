@@ -166,7 +166,7 @@ impl CompiledEngine {
         dst_ip: Option<IpAddr>,
     ) -> Decision {
         let normalized_app = process_name.map(normalize_process_name);
-        let normalized_domain = domain.map(normalize_domain);
+        let normalized_domain = domain.and_then(|domain| normalize_domain(domain).ok());
 
         if let Some(decision) = match_rules(
             &self.app_domain_rules,
@@ -326,7 +326,7 @@ fn match_rules(
 
 fn compile_domain_pattern(raw: &str) -> Option<CompiledDomainPattern> {
     let original = raw.trim().to_string();
-    let suffix_raw = normalize_domain(raw);
+    let suffix_raw = normalize_domain(raw).expect("domain patterns must be validated");
     if suffix_raw.is_empty() {
         return None;
     }
