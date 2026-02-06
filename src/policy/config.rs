@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use idna::domain_to_ascii;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
@@ -409,10 +410,15 @@ use dst_ip_cidr alone or split into separate rules"
                 .app
                 .as_ref()
                 .map(|app| normalize_process_name(app.as_str()));
-            let domain_suffix = rule
-                .domain
-                .as_ref()
-                .and_then(|domain| normalize_domain_pattern(domain.as_str()));
+            let domain_suffix = match rule.domain.as_ref() {
+                Some(domain) => normalize_domain_pattern(domain.as_str()).with_context(|| {
+                    format!(
+                        "rules[{index}].domain '{}' is not a valid domain",
+                        domain.as_str().trim()
+                    )
+                })?,
+                None => None,
+            };
             let domain_is_suffix = rule
                 .domain
                 .as_ref()
@@ -621,21 +627,106 @@ pub(crate) fn normalize_process_name(raw: &str) -> String {
     base_name.to_ascii_lowercase()
 }
 
-pub(crate) fn normalize_domain(raw: &str) -> String {
-    raw.trim().trim_end_matches('.').to_ascii_lowercase()
+pub(crate) fn normalize_domain(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let (has_prefix_dot, normalized_raw) = trimmed
+        .strip_prefix('.')
+        .map_or((false, trimmed), |rest| (true, rest));
+
+    if normalized_raw.is_empty() {
+        return Ok(String::new());
+    }
+
+    let ascii = domain_to_ascii(normalized_raw)
+        .map_err(|err| anyhow!("invalid domain '{raw}': {err:?}"))?
+        .to_ascii_lowercase();
+    validate_domain_ascii(&ascii).with_context(|| format!("invalid domain '{raw}'"))?;
+
+    if has_prefix_dot {
+        Ok(format!(".{ascii}"))
+    } else {
+        Ok(ascii)
+    }
 }
 
-fn normalize_domain_pattern(raw: &str) -> Option<String> {
-    let suffix_raw = normalize_domain(raw);
-    if suffix_raw.is_empty() {
-        return None;
+fn validate_domain_ascii(domain: &str) -> Result<()> {
+    if domain.is_empty() {
+        return Ok(());
     }
-    Some(
+
+    for label in domain.split('.') {
+        if label.is_empty() {
+            bail!("domain contains an empty label");
+        }
+        if label.len() > 63 {
+            bail!("domain label exceeds 63 characters");
+        }
+        let bytes = label.as_bytes();
+        if bytes.first().is_some_and(|b| *b == b'-') || bytes.last().is_some_and(|b| *b == b'-') {
+            bail!("domain labels must not start or end with '-'");
+        }
+        if !bytes
+            .iter()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+        {
+            bail!("domain labels must use only a-z, 0-9, or '-'");
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_domain_pattern(raw: &str) -> Result<Option<String>> {
+    let suffix_raw = normalize_domain(raw)?;
+    if suffix_raw.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
         suffix_raw
             .strip_prefix('.')
             .unwrap_or(suffix_raw.as_str())
             .to_string(),
-    )
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_domain_handles_unicode_and_punycode() {
+        let unicode = "пример.рф";
+        let expected = "xn--e1afmkfd.xn--p1ai";
+
+        assert_eq!(
+            normalize_domain(unicode).expect("unicode domain must normalize"),
+            expected
+        );
+        assert_eq!(
+            normalize_domain(".пример.рф").expect("unicode suffix must normalize"),
+            format!(".{expected}")
+        );
+        assert_eq!(
+            normalize_domain("XN--E1AFMKFD.XN--P1AI").expect("punycode must normalize"),
+            expected
+        );
+
+        let pattern = normalize_domain_pattern(".пример.рф")
+            .expect("pattern must normalize")
+            .expect("pattern must not be empty");
+        assert_eq!(pattern, expected);
+    }
+
+    #[test]
+    fn normalize_domain_rejects_invalid_format() {
+        assert!(normalize_domain("example.com/").is_err());
+        assert!(normalize_domain("exa mple.com").is_err());
+        assert!(normalize_domain("..example.com").is_err());
+    }
 }
 
 fn domain_suffix_overlaps(left: &str, right: &str) -> bool {
