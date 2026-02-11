@@ -1,7 +1,12 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use interprocess::local_socket::{Stream, prelude::*};
-use policy_router_rs::ipc::{ExplainRequest, Request, Response, SOCKET_ENV_VAR, client_roundtrip};
+use policy_router_rs::{
+    ipc::{ExplainRequest, Request, Response, SOCKET_ENV_VAR, client_roundtrip},
+    policy::config::AppConfig,
+};
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
@@ -31,6 +36,10 @@ enum OutputFormat {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    Validate {
+        #[arg(long, default_value = "config.toml")]
+        config: PathBuf,
+    },
     Status,
     Reload,
     Apply,
@@ -49,10 +58,51 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if let Cmd::Validate { config } = &cli.cmd {
+        let (cfg, deps) = AppConfig::load_from_path_with_deps(config)
+            .with_context(|| format!("failed to load {}", config.display()))?;
+        cfg.validate_into()
+            .with_context(|| format!("failed to validate {}", config.display()))?;
+
+        if cli.quiet {
+            return Ok(());
+        }
+
+        match cli.format {
+            OutputFormat::Text => {
+                println!("valid: true");
+                println!("config_path: {}", config.display());
+                println!("include_files: {}", deps.len());
+            }
+            OutputFormat::Json => {
+                #[derive(Serialize)]
+                struct ValidateOutput {
+                    valid: bool,
+                    config_path: String,
+                    include_files: usize,
+                }
+
+                let payload = ValidateOutput {
+                    valid: true,
+                    config_path: config.display().to_string(),
+                    include_files: deps.len(),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload)
+                        .context("failed to serialize validate output")?
+                );
+            }
+        }
+
+        return Ok(());
+    }
+
     let name = resolve_ipc_socket(cli.socket.as_deref())?;
     let mut conn = Stream::connect(name).context("failed to connect to policy-routerd")?;
 
     let req = match cli.cmd {
+        Cmd::Validate { .. } => unreachable!("handled before IPC connection"),
         Cmd::Status => Request::Status,
         Cmd::Reload => Request::Reload,
         Cmd::Apply => Request::Apply,

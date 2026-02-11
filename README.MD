@@ -78,6 +78,7 @@ Daemon:
 - policy-routerd --watch (dev-only: auto-apply config changes)
 
 Client:
+- policy-routerctl validate --config <path>
 - policy-routerctl status
 - policy-routerctl apply
 - policy-routerctl reload
